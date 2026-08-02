@@ -1,5 +1,6 @@
 pub mod api;
 pub mod db;
+pub mod dispatch;
 pub mod error;
 pub mod ingest;
 pub mod module;
