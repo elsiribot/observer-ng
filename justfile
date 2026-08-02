@@ -75,7 +75,7 @@ test_package PACKAGE:
   cargo test -p {{PACKAGE}}
 
 test:
-  just test_package fmo_server
+  cargo test --workspace
 
 # run and restart on changes
 watch *ARGS="-x run":
@@ -92,7 +92,7 @@ clippy_package PACKAGE *ARGS="--locked":
   cargo clippy -p {{PACKAGE}} {{ARGS}}
 
 clippy *ARGS="--locked":
-  just clippy_package fmo_server {{ARGS}}
+  cargo clippy --workspace {{ARGS}}
 
 # run `cargo clippy --fix` on everything
 clippy_fix-package PACKAGE *ARGS="--locked --offline":

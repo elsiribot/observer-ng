@@ -1,31 +1,30 @@
-use anyhow::Context;
-use axum::routing::{get, put};
-use axum::Router;
 use clap::Parser;
-use tower_http::cors::CorsLayer;
-use tracing::info;
+use fmo_core::{FedimintObserverBuilder, ServerOpts};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::meta::{ConsensusMetaCache, MetaOverrideCache};
-use crate::config::{get_config_routes, FederationConfigCache};
-use crate::federation::get_federations_routes;
-use crate::federation::nostr::{get_nostr_federations, publish_federation_event};
-use crate::federation::observer::FederationObserver;
-
-/// Fedimint config fetching service implementation
-mod config;
-mod db;
-/// `anyhow`-based error handling for axum
-mod error;
-mod federation;
-mod meta;
-mod util;
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+enum Cmd {
+    /// Run the observer server
+    Serve(ServeArgs),
+    /// Import federations, raw sessions and block times from a pre-v0.2
+    /// (schema v8) Fedimint Observer database. Derived data is rebuilt by
+    /// the regular replay machinery on the next `serve`.
+    Import {
+        /// Connection string of the old database to import from
+        #[arg(long)]
+        from: String,
+
+        /// Connection string of the new database to import into
+        #[arg(long, env = "FO_DATABASE")]
+        database: String,
+    },
+}
+
+#[derive(Parser, Debug)]
+struct ServeArgs {
     #[arg(long, env = "FO_BIND", default_value = "127.0.0.1:3000")]
     bind: String,
 
@@ -43,17 +42,25 @@ struct Args {
     mempool_url: String,
 }
 
-#[derive(Debug, Clone)]
-struct AppState {
-    federation_config_cache: FederationConfigCache,
-    meta_override_cache: MetaOverrideCache,
-    consensus_meta_cache: ConsensusMetaCache,
-    federation_observer: FederationObserver,
+/// The default Fedimint Observer: core observer plus the standard fedimint
+/// modules. Module authors can build their own FMO flavor by depending on
+/// `fmo_core` and their module crates; see `examples/custom_fmo.rs`.
+fn builder() -> FedimintObserverBuilder {
+    FedimintObserverBuilder::new()
+        .with_module(fmo_module_mint::MintObserver)
+        .with_module(fmo_module_wallet::WalletObserver)
+        .with_module(fmo_module_ln::LnObserver)
+        .with_module(fmo_module_lnv2::LnV2Observer)
+        // Legacy paths kept for the React frontend: module routers are
+        // mounted a second time directly under /federations/:federation_id,
+        // so e.g. wallet's "/utxos" also answers at its historical path.
+        .with_compat_route("/federations/:federation_id", "wallet")
+        .with_compat_route("/federations/:federation_id", "mint")
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    dotenv::dotenv().ok();
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -65,35 +72,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    info!("Starting API server on {}", args.bind);
-
-    let app = Router::new()
-        .route("/health", get(|| async { "Server is up and running!" }))
-        .nest("/config", get_config_routes())
-        .nest("/federations", get_federations_routes())
-        // TODO: move into nostr service/module
-        .route("/nostr/federations", get(get_nostr_federations))
-        .route("/nostr/federations", put(publish_federation_event))
-        .layer(CorsLayer::permissive())
-        .with_state(AppState {
-            federation_config_cache: Default::default(),
-            meta_override_cache: Default::default(),
-            consensus_meta_cache: Default::default(),
-            federation_observer: FederationObserver::new(
-                &args.database,
-                &args.admin_auth,
-                &args.mempool_url,
-            )
-            .await?,
-        });
-
-    let listener = tokio::net::TcpListener::bind(&args.bind)
-        .await
-        .context("Binding to port")?;
-
-    axum::serve(listener, app)
-        .await
-        .context("Starting axum server")?;
-
-    Ok(())
+    match Cmd::parse() {
+        Cmd::Serve(args) => {
+            tracing::info!("Starting API server on {}", args.bind);
+            builder()
+                .run(ServerOpts {
+                    bind: args.bind,
+                    database: args.database,
+                    admin_auth: args.admin_auth,
+                    mempool_url: args.mempool_url,
+                })
+                .await
+        }
+        Cmd::Import { from, database } => {
+            fmo_core::import::import(&from, &database, &builder().registry()).await
+        }
+    }
 }

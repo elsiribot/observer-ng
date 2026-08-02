@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_auth::AuthBearer;
-use chrono::{DateTime, NaiveDate};
+use chrono::NaiveDate;
 use fedimint_core::config::{FederationId, JsonClientConfig};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
