@@ -16,6 +16,7 @@ use crate::federation::Federation;
 use crate::module::ModuleTaskCtx;
 use crate::query::{query, query_opt};
 use crate::registry::ModuleRegistry;
+use crate::services::meta::ConsensusMetaCache;
 use crate::services::CoreServices;
 
 /// Module-agnostic observer core: owns the DB pool, the module registry and
@@ -28,6 +29,7 @@ pub struct FederationObserver {
     connectors: ConnectorRegistry,
     admin_auth: String,
     task_group: TaskGroup,
+    consensus_meta_cache: ConsensusMetaCache,
 }
 
 impl FederationObserver {
@@ -60,11 +62,23 @@ impl FederationObserver {
             connectors,
             admin_auth: admin_auth.to_owned(),
             task_group: Default::default(),
+            consensus_meta_cache: Default::default(),
         };
+
+        observer.seed_block_times().await?;
 
         for federation in observer.list_federations().await? {
             observer.spawn_federation(federation);
         }
+
+        observer.task_group.spawn_cancellable(
+            "fetch block times",
+            observer.clone().fetch_block_times(),
+        );
+        observer.task_group.spawn_cancellable(
+            "sync nostr events",
+            observer.clone().sync_nostr_events(),
+        );
 
         Ok(observer)
     }
@@ -87,6 +101,10 @@ impl FederationObserver {
 
     pub fn task_group(&self) -> &TaskGroup {
         &self.task_group
+    }
+
+    pub fn consensus_meta_cache(&self) -> &ConsensusMetaCache {
+        &self.consensus_meta_cache
     }
 
     pub(crate) async fn connection(&self) -> anyhow::Result<deadpool_postgres::Object> {
@@ -193,6 +211,25 @@ impl FederationObserver {
                     }
                 }
                 .instrument(info_span!("processor", fed = %federation_id.to_prefix())),
+            );
+        }
+
+        {
+            let observer = self.clone();
+            let config = federation.config.clone();
+            self.task_group.spawn_cancellable(
+                format!("Health Monitor for {federation_id}"),
+                async move {
+                    loop {
+                        let e = observer
+                            .monitor_health(federation_id, config.clone())
+                            .await
+                            .expect_err("health monitor task exited unexpectedly");
+                        error!("Health Monitor errored, restarting in 30s: {e}");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                }
+                .instrument(info_span!("health", fed = %federation_id.to_prefix())),
             );
         }
 
