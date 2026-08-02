@@ -2041,6 +2041,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmo_module_mint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "deadpool-postgres",
+ "fedimint-core",
+ "fedimint-mint-common",
+ "fmo_api_types",
+ "fmo_core",
+ "postgres-from-row",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fmo_server"
 version = "0.2.0"
 dependencies = [
