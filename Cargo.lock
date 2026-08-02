@@ -1466,6 +1466,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "email_address"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1019fa28f600f5b581b7a603d515c3f1635da041ca211b5055804788673abfe"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "embedded-io"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1848,6 +1857,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-lnv2-common"
+version = "0.10.0"
+source = "git+https://github.com/fedimint/fedimint?tag=v0.10.0#76f6c7ce5435a609a256d58b0924161c5fc9b3ec"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcoin 0.32.8",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-ln-common",
+ "fedimint-tpe",
+ "group",
+ "lightning-invoice",
+ "lnurl-rs",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fedimint-logging"
 version = "0.10.0"
 source = "git+https://github.com/fedimint/fedimint?tag=v0.10.0#76f6c7ce5435a609a256d58b0924161c5fc9b3ec"
@@ -1941,6 +1972,21 @@ dependencies = [
  "thiserror 1.0.69",
  "tiny-keccak",
  "zeroize",
+]
+
+[[package]]
+name = "fedimint-tpe"
+version = "0.10.0"
+source = "git+https://github.com/fedimint/fedimint?tag=v0.10.0#76f6c7ce5435a609a256d58b0924161c5fc9b3ec"
+dependencies = [
+ "bitcoin_hashes 0.14.1",
+ "bls12_381",
+ "fedimint-core",
+ "group",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde-big-array",
 ]
 
 [[package]]
@@ -2053,6 +2099,23 @@ dependencies = [
  "fmo_api_types",
  "fmo_core",
  "postgres-from-row",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fmo_module_lnv2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "deadpool-postgres",
+ "fedimint-core",
+ "fedimint-lnv2-common",
+ "fmo_core",
  "serde_json",
  "tokio",
  "tracing",
@@ -3778,6 +3841,24 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lnurl-rs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41eacdd87b675792f7752f3dd0937a00241a504c3956c47f72986490662e1db4"
+dependencies = [
+ "aes",
+ "anyhow",
+ "base64 0.22.1",
+ "bech32 0.11.1",
+ "bitcoin 0.32.8",
+ "cbc",
+ "email_address",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
