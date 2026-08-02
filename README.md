@@ -85,7 +85,22 @@ fmo_server serve
 ```
 
 The import verifies per-federation session counts and works for federations that no longer exist, since no
-network access is needed. Keep the old database around as a backup until the new instance is verified.
+network access is needed. The import is resumable (re-run it after an interruption) and tolerates a server
+that is already fetching newer sessions concurrently. Keep the old database around as a backup until the
+new instance is verified.
+
+For the initial import + replay of a large history, two settings make a big difference (the bottleneck is
+WAL fsync volume, not CPU):
+
+```sql
+-- scratch database that can be rebuilt from raw data at any time; re-enable after catch-up
+ALTER DATABASE fmo SET synchronous_commit = 'off';
+```
+
+```bash
+# don't refresh the (expensive) materialized views every minute while replaying history
+FO_REFRESH_INTERVAL_SECS=900 fmo_server serve
+```
 
 ## Development
 Fedimint Observer comes with a [nix](https://nixos.org/) development environment. You can enter it by running `nix develop`.

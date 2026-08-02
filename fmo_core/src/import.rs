@@ -2,6 +2,7 @@ use deadpool_postgres::Runtime;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::Decodable;
 use fedimint_core::session_outcome::SessionOutcome;
+use futures::StreamExt;
 use tokio_postgres::NoTls;
 use tracing::info;
 
@@ -94,7 +95,20 @@ pub async fn import(old_db: &str, new_db: &str, registry: &ModuleRegistry) -> an
         info!("Importing {old_session_count} sessions for federation {federation_id}");
 
         let decoders = ModuleRegistry::fallback_decoders();
-        let mut imported: i64 = 0;
+        // Resume: skip sessions already imported by a previous (interrupted)
+        // run. Sessions are contiguous, so the count is the next index.
+        let mut imported: i64 = pool
+            .get()
+            .await?
+            .query_one(
+                "SELECT COUNT(*) FROM sessions WHERE federation_id = $1",
+                &[&federation_id_bytes(federation_id)],
+            )
+            .await?
+            .get(0);
+        if imported > 0 {
+            info!("  resuming at session {imported}");
+        }
         const BATCH: i64 = 500;
         loop {
             // The old `sessions` table stores raw bytes in the `session`
@@ -115,30 +129,48 @@ pub async fn import(old_db: &str, new_db: &str, registry: &ModuleRegistry) -> an
                 break;
             }
 
+            let row_count = rows.len();
+
+            // Decoding is the CPU-heavy part; use all cores.
+            let num_cpus = std::thread::available_parallelism()
+                .map(|cpus| cpus.get())
+                .unwrap_or(8);
+            let decoded: Vec<(i32, SessionOutcome)> = futures::stream::iter(rows.into_iter())
+                .map(|row| {
+                    let decoders = decoders.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let session_index: i32 = row.get(0);
+                        let data: Vec<u8> = row.get(1);
+                        SessionOutcome::consensus_decode_whole(&data, &decoders)
+                            .map(|session| (session_index, session))
+                            .map_err(|e| {
+                                anyhow::anyhow!("failed to decode session {session_index}: {e}")
+                            })
+                    })
+                })
+                .buffered(num_cpus)
+                .map(|join_result| join_result.expect("decode task panicked"))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .map_err(|e: anyhow::Error| anyhow::anyhow!("federation {federation_id}: {e}"))?;
+
             let mut conn = pool.get().await?;
             let dbtx = conn.transaction().await?;
-            for row in &rows {
-                let session_index: i32 = row.get(0);
-                let data: Vec<u8> = row.get(1);
-                let session =
-                    SessionOutcome::consensus_decode_whole(&data, &decoders).map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to decode session {session_index} of federation \
-                             {federation_id}: {e}"
-                        )
-                    })?;
+            for (session_index, session) in &decoded {
                 ingest_session(
                     &dbtx,
                     config,
                     *federation_id,
-                    session_index as u64,
-                    &session,
+                    *session_index as u64,
+                    session,
                 )
                 .await?;
             }
             dbtx.commit().await?;
 
-            imported += rows.len() as i64;
+            imported += row_count as i64;
             if imported % 5_000 < BATCH {
                 let percentage = (imported as f64) / (old_session_count.max(1) as f64) * 100.0;
                 info!("  {imported}/{old_session_count} sessions ({percentage:.1}%)");
@@ -155,8 +187,12 @@ pub async fn import(old_db: &str, new_db: &str, registry: &ModuleRegistry) -> an
             )
             .await?
             .get(0);
+        // The new DB may legitimately contain MORE sessions than the source
+        // (e.g. the fetcher already synced newer sessions from a live
+        // federation, or the snapshot is older than a previous import), so
+        // only require that everything from the source is covered.
         anyhow::ensure!(
-            old_session_count == new_session_count,
+            new_session_count >= old_session_count,
             "Session count mismatch for federation {federation_id}: old {old_session_count}, new {new_session_count}"
         );
         info!("Federation {federation_id}: {new_session_count} sessions imported and verified");

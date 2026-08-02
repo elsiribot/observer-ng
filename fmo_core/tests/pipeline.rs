@@ -320,3 +320,168 @@ async fn ingest_fills_structural_tables() {
     assert_eq!(cis.get::<_, i64>("n"), 1);
     assert_eq!(cis.get::<_, String>("kind"), "dummy");
 }
+
+/// Module that fails deterministically on one session, to test that the
+/// batch-processing fast path falls back to per-session transactions and
+/// isolates the failure: earlier sessions commit, the cursor stops exactly at
+/// the failing session, and other modules keep progressing.
+struct PoisonedModule;
+
+#[async_trait::async_trait]
+impl ObserverModule for PoisonedModule {
+    fn kind(&self) -> ModuleKind {
+        ModuleKind::from_static_str("dummy")
+    }
+
+    fn decoder(&self) -> Decoder {
+        use fedimint_core::module::CommonModuleInit;
+        fedimint_dummy_common::DummyCommonInit::decoder()
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn migrations(&self) -> &'static [Migration] {
+        &[Migration {
+            sql: "CREATE TABLE seen (session_index INTEGER NOT NULL, what TEXT NOT NULL);",
+        }]
+    }
+
+    async fn process_input(
+        &self,
+        ctx: &mut ProcessCtx<'_>,
+        _input: &DynInput,
+        meta: &ItemMeta,
+    ) -> anyhow::Result<ProcessedItem> {
+        if meta.session_index == 1 {
+            anyhow::bail!("poison session");
+        }
+        ctx.dbtx
+            .execute(
+                "INSERT INTO seen VALUES ($1, 'input')",
+                &[&(meta.session_index as i32)],
+            )
+            .await?;
+        Ok(ProcessedItem::default())
+    }
+
+    async fn process_output(
+        &self,
+        _ctx: &mut ProcessCtx<'_>,
+        _output: &DynOutput,
+        _meta: &ItemMeta,
+    ) -> anyhow::Result<ProcessedItem> {
+        Ok(ProcessedItem::default())
+    }
+
+    async fn process_ci(
+        &self,
+        _ctx: &mut ProcessCtx<'_>,
+        _ci: &DynModuleConsensusItem,
+        _meta: &CiMeta,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn failing_session_stalls_only_its_module_at_the_right_cursor() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    {
+        let conn = pool.get().await.unwrap();
+        conn.batch_execute(
+            "DROP SCHEMA IF EXISTS fmo_dummy CASCADE; DROP SCHEMA IF EXISTS fmo_dummy2 CASCADE;",
+        )
+        .await
+        .unwrap();
+    }
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    for session_index in 0..3u64 {
+        let session = dummy_session(4_000 + session_index);
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::ingest::ingest_session(&dbtx, &config, federation_id, session_index, &session)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let poisoned: Arc<dyn ObserverModule> = Arc::new(PoisonedModule);
+    let bystander: Arc<dyn ObserverModule> = Arc::new(TestModule { kind: "dummy2" });
+    fmo_core::db::migrations::setup_module_schema(&pool, "dummy", 1, poisoned.migrations())
+        .await
+        .unwrap();
+    fmo_core::db::migrations::setup_module_schema(&pool, "dummy2", 1, bystander.migrations())
+        .await
+        .unwrap();
+    let registry = ModuleRegistry::new(vec![poisoned, bystander]);
+
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
+    // poisoned: session 0 only; bystander: all 3
+    assert_eq!(processed, 4);
+
+    let conn = pool.get().await.unwrap();
+    // session 0 committed via the per-session fallback before the failure
+    let seen: Vec<i32> = conn
+        .query("SELECT session_index FROM fmo_dummy.seen ORDER BY 1", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(seen, vec![0]);
+    // poisoned module's cursor stops exactly at the failing session
+    let cursor: i32 = conn
+        .query_one(
+            "SELECT next_session_index FROM module_progress WHERE module_kind = 'dummy' AND federation_id = $1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(cursor, 1);
+    // the other module is unaffected
+    let cursor: i32 = conn
+        .query_one(
+            "SELECT next_session_index FROM module_progress WHERE module_kind = 'dummy2' AND federation_id = $1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(cursor, 3);
+    drop(conn);
+
+    // retrying makes no progress but doesn't wedge anything else either
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
+    assert_eq!(processed, 0);
+}

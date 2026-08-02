@@ -42,6 +42,9 @@ impl FederationObserver {
         let pool = {
             let pool_config = deadpool_postgres::Config {
                 url: Some(database.to_owned()),
+                // Sized for many federations processing concurrently; the
+                // deadpool default (10) starves the per-federation tasks.
+                pool: Some(deadpool_postgres::PoolConfig::new(32)),
                 ..Default::default()
             };
             pool_config.create_pool(Some(Runtime::Tokio1), NoTls)

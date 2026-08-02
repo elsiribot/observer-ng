@@ -132,6 +132,35 @@ async fn import_from_old_schema_db() {
         .unwrap()
         .get(0);
     assert_eq!(cursors, 0);
+    drop(conn);
+
+    // Regression (found with a production snapshot): when the target DB
+    // already contains MORE sessions than the source — e.g. the fetcher
+    // synced newer sessions from a live federation while importing from a
+    // midnight snapshot, or a previous import already ran — the import must
+    // succeed instead of failing its count verification.
+    {
+        let session = dummy_session(9_999);
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::ingest::ingest_session(&dbtx, &config, federation_id, 3, &session)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+    fmo_core::import::import(&old_url, &new_url, &registry)
+        .await
+        .expect("import must tolerate extra sessions beyond the snapshot");
+    let conn = pool.get().await.unwrap();
+    let sessions: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM sessions WHERE federation_id = $1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(sessions, 4, "3 from snapshot + 1 newer fetched session");
 }
 
 fn build_old_db_url(new_url: &str) -> Option<String> {

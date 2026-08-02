@@ -8,6 +8,7 @@ use fedimint_core::core::ModuleKind;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::epoch::ConsensusItem;
 use fedimint_core::session_outcome::SessionOutcome;
+use futures::StreamExt;
 use tracing::{debug, warn};
 
 use crate::module::{CiMeta, ItemMeta, ObserverModule, ProcessCtx};
@@ -19,9 +20,11 @@ use crate::services::CoreServices;
 /// fetch cursor. Live processing and historical replay are the same code
 /// path: a freshly added module simply starts with its cursor at 0.
 ///
-/// Each (module, session) pair is processed in its own transaction together
-/// with the module's cursor advance, so modules progress independently and a
-/// failing module only stalls itself.
+/// For throughput, each module processes a whole batch of sessions in one
+/// transaction together with a single cursor advance (still atomic, so the
+/// per-module progress invariant holds). If the batch fails, it falls back to
+/// per-session transactions so only the actually-failing session stalls the
+/// module while everything before it commits.
 ///
 /// Returns the number of (module, session) units processed.
 pub async fn process_pending(
@@ -64,17 +67,12 @@ pub async fn process_pending(
             *cursor = row.get(1);
         }
     }
-    drop(conn);
 
     let min_next = cursors.values().copied().min().expect("registry not empty");
     if min_next > fetched {
         return Ok(0);
     }
 
-    let decoders = registry.decoders(config);
-    let mut processed = 0u64;
-
-    let conn = pool.get().await?;
     let rows = conn
         .query(
             "SELECT session_index, data FROM sessions
@@ -86,55 +84,82 @@ pub async fn process_pending(
         .await?;
     drop(conn);
 
-    for row in rows {
-        let session_index: i32 = row.get(0);
-        let session = SessionOutcome::consensus_decode_whole(&row.get::<_, Vec<u8>>(1), &decoders)?;
+    // Decode the batch in parallel; consensus decoding is the CPU-heavy part
+    // of replay.
+    let num_cpus = std::thread::available_parallelism()
+        .map(|cpus| cpus.get())
+        .unwrap_or(8);
+    let decoders = registry.decoders(config);
+    let decoded: Vec<(i32, SessionOutcome)> = futures::stream::iter(rows.into_iter())
+        .map(|row| {
+            let decoders = decoders.clone();
+            tokio::task::spawn_blocking(move || {
+                let session_index: i32 = row.get(0);
+                let data: Vec<u8> = row.get(1);
+                SessionOutcome::consensus_decode_whole(&data, &decoders)
+                    .map(|session| (session_index, session))
+            })
+        })
+        .buffered(num_cpus)
+        .map(|join_result| join_result.expect("decode task panicked"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<_, _>>()?;
 
-        for (kind, module) in registry.iter() {
-            if cursors.get(kind).copied().unwrap_or(0) != session_index {
-                continue;
+    let mut processed = 0u64;
+    for (kind, module) in registry.iter() {
+        let cursor = cursors.get(kind).copied().unwrap_or(0);
+        let pending: Vec<&(i32, SessionOutcome)> = decoded
+            .iter()
+            .filter(|(session_index, _)| *session_index >= cursor)
+            .collect();
+        if pending.is_empty() {
+            continue;
+        }
+
+        match process_module_batch(
+            pool,
+            module.as_ref(),
+            services,
+            federation_id,
+            config,
+            &pending,
+        )
+        .await
+        {
+            Ok(units) => {
+                processed += units;
             }
-
-            let mut module_conn = pool.get().await?;
-            let dbtx = module_conn.transaction().await?;
-            dbtx.batch_execute(&format!(
-                "SET LOCAL search_path TO {}, public",
-                crate::db::migrations::schema_name(kind.as_str())
-            ))
-            .await?;
-
-            let result = dispatch_session_to_module(
-                &dbtx,
-                module.as_ref(),
-                services,
-                federation_id,
-                config,
-                session_index as u64,
-                &session,
-            )
-            .await;
-
-            match result {
-                Ok(()) => {
-                    dbtx.execute(
-                        "INSERT INTO public.module_progress VALUES ($1, $2, $3)
-                         ON CONFLICT (module_kind, federation_id)
-                         DO UPDATE SET next_session_index = EXCLUDED.next_session_index",
-                        &[&kind.as_str(), &federation_id_bytes, &(session_index + 1)],
+            Err(e) => {
+                debug!(
+                    "Module {kind} failed batch processing, retrying per session \
+                     to isolate the failure: {e:?}"
+                );
+                for (session_index, session) in &pending {
+                    match process_module_single(
+                        pool,
+                        module.as_ref(),
+                        services,
+                        federation_id,
+                        config,
+                        *session_index,
+                        session,
                     )
-                    .await?;
-                    dbtx.commit().await?;
-                    *cursors.get_mut(kind).expect("cursor exists") = session_index + 1;
-                    processed += 1;
-                }
-                Err(e) => {
-                    // The module's transaction rolls back and its cursor stays
-                    // put; it will retry on the next round while other modules
-                    // continue to make progress.
-                    warn!(
-                        "Module {kind} failed processing session {session_index} \
-                         of federation {federation_id}: {e:?}"
-                    );
+                    .await
+                    {
+                        Ok(()) => processed += 1,
+                        Err(e) => {
+                            // The module's transaction rolled back and its
+                            // cursor stays put; it will retry on the next
+                            // round while other modules continue.
+                            warn!(
+                                "Module {kind} failed processing session {session_index} \
+                                 of federation {federation_id}: {e:?}"
+                            );
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -142,6 +167,108 @@ pub async fn process_pending(
 
     debug!("Processed {processed} (module, session) units for federation {federation_id}");
     Ok(processed)
+}
+
+/// Checks whether a session contains any item belonging to the module's kind.
+fn session_touches_module(
+    config: &ClientConfig,
+    module_kind: &ModuleKind,
+    session: &SessionOutcome,
+) -> bool {
+    session
+        .items
+        .iter()
+        .any(|accepted_item| match &accepted_item.item {
+            ConsensusItem::Transaction(transaction) => transaction
+                .inputs
+                .iter()
+                .map(|input| input.module_instance_id())
+                .chain(
+                    transaction
+                        .outputs
+                        .iter()
+                        .map(|output| output.module_instance_id()),
+                )
+                .any(|instance_id| instance_to_kind(config, instance_id) == module_kind.as_str()),
+            ConsensusItem::Module(module_ci) => {
+                instance_to_kind(config, module_ci.module_instance_id()) == module_kind.as_str()
+            }
+            _ => false,
+        })
+}
+
+/// Processes a contiguous run of sessions for one module in a single
+/// transaction, advancing the cursor once at the end.
+async fn process_module_batch(
+    pool: &Pool,
+    module: &dyn ObserverModule,
+    services: &Arc<CoreServices>,
+    federation_id: FederationId,
+    config: &ClientConfig,
+    pending: &[&(i32, SessionOutcome)],
+) -> anyhow::Result<u64> {
+    let kind = module.kind();
+    let federation_id_bytes = federation_id.consensus_encode_to_vec();
+
+    let mut conn = pool.get().await?;
+    let dbtx = conn.transaction().await?;
+    dbtx.batch_execute(&format!(
+        "SET LOCAL search_path TO {}, public",
+        crate::db::migrations::schema_name(kind.as_str())
+    ))
+    .await?;
+
+    let mut units = 0u64;
+    let mut last_session_index = None;
+    for (session_index, session) in pending {
+        if session_touches_module(config, &kind, session) {
+            dispatch_session_to_module(
+                &dbtx,
+                module,
+                services,
+                federation_id,
+                config,
+                *session_index as u64,
+                session,
+            )
+            .await?;
+        }
+        units += 1;
+        last_session_index = Some(*session_index);
+    }
+
+    if let Some(last_session_index) = last_session_index {
+        dbtx.execute(
+            "INSERT INTO public.module_progress VALUES ($1, $2, $3)
+             ON CONFLICT (module_kind, federation_id)
+             DO UPDATE SET next_session_index = EXCLUDED.next_session_index",
+            &[
+                &kind.as_str(),
+                &federation_id_bytes,
+                &(last_session_index + 1),
+            ],
+        )
+        .await?;
+    }
+    dbtx.commit().await?;
+
+    Ok(units)
+}
+
+/// Processes a single session for one module in its own transaction. Used as
+/// the fallback path to isolate failing sessions.
+async fn process_module_single(
+    pool: &Pool,
+    module: &dyn ObserverModule,
+    services: &Arc<CoreServices>,
+    federation_id: FederationId,
+    config: &ClientConfig,
+    session_index: i32,
+    session: &SessionOutcome,
+) -> anyhow::Result<()> {
+    let single = (session_index, session.clone());
+    process_module_batch(pool, module, services, federation_id, config, &[&single]).await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -165,6 +292,29 @@ async fn dispatch_session_to_module(
         services: services.clone(),
     };
 
+    // Cached statements: write-backs run for every item during replay.
+    let update_input = dbtx
+        .prepare_cached(
+            "UPDATE public.transaction_inputs
+             SET amount_msat = $4, details = $5
+             WHERE federation_id = $1 AND txid = $2 AND in_index = $3",
+        )
+        .await?;
+    let update_output = dbtx
+        .prepare_cached(
+            "UPDATE public.transaction_outputs
+             SET amount_msat = $4, details = $5
+             WHERE federation_id = $1 AND txid = $2 AND out_index = $3",
+        )
+        .await?;
+    let update_ci = dbtx
+        .prepare_cached(
+            "UPDATE public.consensus_items
+             SET details = $4
+             WHERE federation_id = $1 AND session_index = $2 AND item_index = $3",
+        )
+        .await?;
+
     for (item_index, accepted_item) in session.items.iter().enumerate() {
         match &accepted_item.item {
             ConsensusItem::Transaction(transaction) => {
@@ -185,9 +335,7 @@ async fn dispatch_session_to_module(
                     };
                     let processed = module.process_input(&mut ctx, input, &meta).await?;
                     dbtx.execute(
-                        "UPDATE public.transaction_inputs
-                         SET amount_msat = $4, details = $5
-                         WHERE federation_id = $1 AND txid = $2 AND in_index = $3",
+                        &update_input,
                         &[
                             &federation_id_bytes,
                             &txid.consensus_encode_to_vec(),
@@ -214,9 +362,7 @@ async fn dispatch_session_to_module(
                     };
                     let processed = module.process_output(&mut ctx, output, &meta).await?;
                     dbtx.execute(
-                        "UPDATE public.transaction_outputs
-                         SET amount_msat = $4, details = $5
-                         WHERE federation_id = $1 AND txid = $2 AND out_index = $3",
+                        &update_output,
                         &[
                             &federation_id_bytes,
                             &txid.consensus_encode_to_vec(),
@@ -243,9 +389,7 @@ async fn dispatch_session_to_module(
                 let details = module.process_ci(&mut ctx, module_ci, &meta).await?;
                 if details.is_some() {
                     dbtx.execute(
-                        "UPDATE public.consensus_items
-                         SET details = $4
-                         WHERE federation_id = $1 AND session_index = $2 AND item_index = $3",
+                        &update_ci,
                         &[
                             &federation_id_bytes,
                             &(session_index as i32),
@@ -273,7 +417,7 @@ pub async fn run_processor(
 ) -> anyhow::Result<()> {
     loop {
         let processed =
-            process_pending(&pool, &registry, &services, federation_id, &config, 100).await?;
+            process_pending(&pool, &registry, &services, federation_id, &config, 500).await?;
         if processed == 0 {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
