@@ -26,3 +26,6 @@ tokio-postgres = { version = "0.7.11", features = [
     "with-serde_json-1",
 ] }
 tracing = "0.1.40"
+
+[dev-dependencies]
+fedimint-dummy-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
