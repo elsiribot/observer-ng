@@ -18,9 +18,7 @@ use fedimint_wallet_common::{
 };
 use fmo_api_types::FederationUtxo;
 use fmo_core::api::ModuleApiState;
-use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
-};
+use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use fmo_core::query::query;
 use postgres_from_row::FromRow;
 use tracing::warn;
@@ -207,7 +205,8 @@ impl ObserverModule for WalletObserver {
                 }
             }
             WalletConsensusItem::PegOutSignature(peg_out_sig) => {
-                self.process_peg_out_signature(ctx, meta, peg_out_sig).await?;
+                self.process_peg_out_signature(ctx, meta, peg_out_sig)
+                    .await?;
             }
             _ => {
                 // other WalletConsensusItems are not needed yet

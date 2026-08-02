@@ -24,15 +24,20 @@ pub async fn setup_core_schema(pool: &Pool) -> anyhow::Result<()> {
     let mut conn = pool.get().await?;
 
     let current: i32 = match conn
-        .query_one("SELECT to_regclass('public.core_schema_version')::text", &[])
+        .query_one(
+            "SELECT to_regclass('public.core_schema_version')::text",
+            &[],
+        )
         .await?
         .get::<_, Option<String>>(0)
     {
-        Some(_) => {
-            conn.query_one("SELECT COALESCE(MAX(version), -1) FROM core_schema_version", &[])
-                .await?
-                .get(0)
-        }
+        Some(_) => conn
+            .query_one(
+                "SELECT COALESCE(MAX(version), -1) FROM core_schema_version",
+                &[],
+            )
+            .await?
+            .get(0),
         None => -1,
     };
 

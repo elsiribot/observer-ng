@@ -1,8 +1,7 @@
 mod common;
 
-use fedimint_core::encoding::Encodable;
-
 use common::{dummy_config, dummy_session, test_pool, DB_LOCK};
+use fedimint_core::encoding::Encodable;
 
 /// Import from a v8-schema database: raw sessions round-trip through decode +
 /// structural ingest, block times are copied, session counts are verified.
@@ -23,8 +22,12 @@ async fn import_from_old_schema_db() {
     // legacy fmo_server/schema/v0.sql)
     {
         let conn = pool.get().await.unwrap();
-        let _ = conn.execute("DROP DATABASE IF EXISTS fmo_test_old", &[]).await;
-        conn.execute("CREATE DATABASE fmo_test_old", &[]).await.unwrap();
+        let _ = conn
+            .execute("DROP DATABASE IF EXISTS fmo_test_old", &[])
+            .await;
+        conn.execute("CREATE DATABASE fmo_test_old", &[])
+            .await
+            .unwrap();
     }
     let (old, old_conn) = tokio_postgres::connect(&old_url, tokio_postgres::NoTls)
         .await
@@ -88,14 +91,20 @@ async fn import_from_old_schema_db() {
 
     let conn = pool.get().await.unwrap();
     let sessions: i64 = conn
-        .query_one("SELECT COUNT(*) FROM sessions WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM sessions WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);
     assert_eq!(sessions, 3);
     // structural ingest ran during import
     let txs: i64 = conn
-        .query_one("SELECT COUNT(*) FROM transactions WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM transactions WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);

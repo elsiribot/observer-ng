@@ -104,8 +104,7 @@ pub(crate) async fn monitor_gateways(ctx: ModuleTaskCtx) -> anyhow::Result<()> {
     loop {
         interval.tick().await;
         if let Err(e) =
-            fetch_and_store_gateways(&ctx, ctx.federation_id, &api, ln_instance_id, &peer_ids)
-                .await
+            fetch_and_store_gateways(&ctx, ctx.federation_id, &api, ln_instance_id, &peer_ids).await
         {
             warn!(
                 "Failed to fetch gateways for federation {}: {:?}",

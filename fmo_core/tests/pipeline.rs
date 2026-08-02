@@ -2,18 +2,15 @@ mod common;
 
 use std::sync::Arc;
 
+use common::{dummy_config, dummy_session, insert_federation, reset_db, test_pool, DB_LOCK};
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::Amount;
-use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
-};
+use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use fmo_core::registry::ModuleRegistry;
 use fmo_core::services::CoreServices;
 use serde_json::json;
-
-use common::{dummy_config, dummy_session, insert_federation, reset_db, test_pool, DB_LOCK};
 
 /// Observer module for the dummy fedimint module used in tests. Its kind is
 /// configurable so tests can register "two different" modules.
@@ -124,16 +121,27 @@ async fn dispatch_processes_and_replays() {
 
     let module: Arc<dyn ObserverModule> = Arc::new(TestModule { kind: "dummy" });
     let registry = ModuleRegistry::new(vec![module]);
-    fmo_core::db::migrations::setup_module_schema(&pool, "dummy", 1, &[Migration {
-        sql: "CREATE TABLE seen (session_index INTEGER NOT NULL, what TEXT NOT NULL);",
-    }])
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "dummy",
+        1,
+        &[Migration {
+            sql: "CREATE TABLE seen (session_index INTEGER NOT NULL, what TEXT NOT NULL);",
+        }],
+    )
     .await
     .unwrap();
 
-    let processed =
-        fmo_core::dispatch::process_pending(&pool, &registry, &services, federation_id, &config, 100)
-            .await
-            .unwrap();
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(processed, 3);
 
     let conn = pool.get().await.unwrap();
@@ -179,10 +187,16 @@ async fn dispatch_processes_and_replays() {
     drop(conn);
 
     // caught up: second run is a no-op
-    let processed =
-        fmo_core::dispatch::process_pending(&pool, &registry, &services, federation_id, &config, 100)
-            .await
-            .unwrap();
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(processed, 0);
 
     // a module registered later replays from session 0
@@ -191,16 +205,27 @@ async fn dispatch_processes_and_replays() {
         Arc::new(TestModule { kind: "dummy" }) as Arc<dyn ObserverModule>,
         late_module,
     ]);
-    fmo_core::db::migrations::setup_module_schema(&pool, "dummy2", 1, &[Migration {
-        sql: "CREATE TABLE seen (session_index INTEGER NOT NULL, what TEXT NOT NULL);",
-    }])
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "dummy2",
+        1,
+        &[Migration {
+            sql: "CREATE TABLE seen (session_index INTEGER NOT NULL, what TEXT NOT NULL);",
+        }],
+    )
     .await
     .unwrap();
 
-    let processed =
-        fmo_core::dispatch::process_pending(&pool, &registry, &services, federation_id, &config, 100)
-            .await
-            .unwrap();
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(processed, 3, "late module replays all 3 sessions");
 
     let conn = pool.get().await.unwrap();
@@ -251,13 +276,19 @@ async fn ingest_fills_structural_tables() {
     let conn = pool.get().await.unwrap();
     let fed = federation_id.consensus_encode_to_vec();
     let sessions: i64 = conn
-        .query_one("SELECT COUNT(*) FROM sessions WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM sessions WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);
     assert_eq!(sessions, 1);
     let txs: i64 = conn
-        .query_one("SELECT COUNT(*) FROM transactions WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM transactions WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);

@@ -73,7 +73,14 @@ pub async fn run_fetcher(
     while let Some((session_index, session_outcome)) = session_stream.next().await {
         let mut connection = pool.get().await?;
         let dbtx = connection.transaction().await?;
-        ingest_session(&dbtx, &config, federation_id, session_index, &session_outcome).await?;
+        ingest_session(
+            &dbtx,
+            &config,
+            federation_id,
+            session_index,
+            &session_outcome,
+        )
+        .await?;
         dbtx.commit().await?;
 
         let elapsed = timer.elapsed().unwrap_or_default();

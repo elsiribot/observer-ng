@@ -7,7 +7,7 @@ use deadpool_postgres::{Config, Runtime};
 use fedimint_core::config::{
     ClientConfig, ClientModuleConfig, FederationId, GlobalClientConfig, PeerUrl,
 };
-use fedimint_core::core::ModuleKind;
+use fedimint_core::core::{IntoDynInstance, ModuleKind};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::epoch::ConsensusItem;
 use fedimint_core::module::{AmountUnit, CoreConsensusVersion, ModuleConsensusVersion};
@@ -15,8 +15,9 @@ use fedimint_core::session_outcome::{AcceptedItem, SessionOutcome};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, PeerId};
 use fedimint_dummy_common::config::DummyClientConfig;
-use fedimint_dummy_common::{DummyConsensusItem, DummyInput, DummyInputV1, DummyOutput, DummyOutputV1};
-use fedimint_core::core::IntoDynInstance;
+use fedimint_dummy_common::{
+    DummyConsensusItem, DummyInput, DummyInputV1, DummyOutput, DummyOutputV1,
+};
 use tokio_postgres::NoTls;
 
 /// Tests share one database; serialize DB-touching tests within a binary.
@@ -43,7 +44,9 @@ pub async fn reset_db(pool: &deadpool_postgres::Pool) {
     )
     .await
     .unwrap();
-    fmo_core::db::migrations::setup_core_schema(pool).await.unwrap();
+    fmo_core::db::migrations::setup_core_schema(pool)
+        .await
+        .unwrap();
 }
 
 /// Minimal client config with a single dummy module instance.
@@ -111,9 +114,7 @@ pub fn dummy_session(amount_msat: u64) -> SessionOutcome {
                 peer: PeerId::from(0),
             },
             AcceptedItem {
-                item: ConsensusItem::Module(
-                    DummyConsensusItem.into_dyn(DUMMY_INSTANCE_ID.into()),
-                ),
+                item: ConsensusItem::Module(DummyConsensusItem.into_dyn(DUMMY_INSTANCE_ID.into())),
                 peer: PeerId::from(0),
             },
         ],

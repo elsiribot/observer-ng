@@ -24,9 +24,13 @@ async fn core_schema_applies_and_is_idempotent() {
     conn.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         .await
         .unwrap();
-    fmo_core::db::migrations::setup_core_schema(&pool).await.unwrap();
+    fmo_core::db::migrations::setup_core_schema(&pool)
+        .await
+        .unwrap();
     // idempotent
-    fmo_core::db::migrations::setup_core_schema(&pool).await.unwrap();
+    fmo_core::db::migrations::setup_core_schema(&pool)
+        .await
+        .unwrap();
     let v: i32 = conn
         .query_one("SELECT MAX(version) FROM core_schema_version", &[])
         .await
@@ -46,7 +50,9 @@ async fn module_schema_version_bump_drops_and_recreates() {
     conn.batch_execute("DROP SCHEMA IF EXISTS fmo_testmod CASCADE;")
         .await
         .unwrap();
-    fmo_core::db::migrations::setup_core_schema(&pool).await.unwrap();
+    fmo_core::db::migrations::setup_core_schema(&pool)
+        .await
+        .unwrap();
     let migs = [fmo_core::db::migrations::Migration {
         sql: "CREATE TABLE things (id INTEGER PRIMARY KEY);",
     }];

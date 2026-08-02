@@ -3,18 +3,15 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use common::{dummy_config, dummy_session, insert_federation, reset_db, test_pool, DB_LOCK};
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_core::Amount;
-use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
-};
+use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use fmo_core::registry::ModuleRegistry;
 use fmo_core::services::CoreServices;
 use serde_json::json;
-
-use common::{dummy_config, dummy_session, insert_federation, reset_db, test_pool, DB_LOCK};
 
 struct DummyObserver;
 
@@ -145,10 +142,16 @@ async fn e2e_pipeline_and_replay_idempotency() {
     }
 
     // process everything
-    let processed =
-        fmo_core::dispatch::process_pending(&pool, &registry, &services, federation_id, &config, 100)
-            .await
-            .unwrap();
+    let processed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(processed, 5);
 
     // matview refresh works on the populated schema
@@ -196,10 +199,16 @@ async fn e2e_pipeline_and_replay_idempotency() {
         .execute("UPDATE module_progress SET next_session_index = 0", &[])
         .await
         .unwrap();
-    let replayed =
-        fmo_core::dispatch::process_pending(&pool, &registry, &services, federation_id, &config, 100)
-            .await
-            .unwrap();
+    let replayed = fmo_core::dispatch::process_pending(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        100,
+    )
+    .await
+    .unwrap();
     assert_eq!(replayed, 5);
 
     let after = table_counts(&pool).await;
@@ -207,7 +216,11 @@ async fn e2e_pipeline_and_replay_idempotency() {
     // was really re-invoked; every other table must be unchanged.
     for (table, count_before) in &before {
         if table == "fmo_dummy.seen" {
-            assert_eq!(after[table], count_before * 2, "module re-invoked on replay");
+            assert_eq!(
+                after[table],
+                count_before * 2,
+                "module re-invoked on replay"
+            );
         } else {
             assert_eq!(
                 after[table], *count_before,

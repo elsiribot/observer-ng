@@ -114,7 +114,7 @@ I currently run the public instance at https://observer.fedimint.org using the f
     };
     serviceConfig = {
       ExecStart = ''
-        ${fmo.fmo_server}/bin/fmo_server
+        ${fmo.fmo_server}/bin/fmo_server serve
       '';
       User = "fmo";
       Group = "fmo";

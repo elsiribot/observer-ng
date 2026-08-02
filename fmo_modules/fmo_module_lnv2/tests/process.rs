@@ -87,7 +87,10 @@ async fn lnv2_output_records_contract_and_time_vote_feeds_session_times() {
         index: 0,
         peer_count: 4,
     };
-    let processed = module.process_output(&mut ctx, &output, &meta).await.unwrap();
+    let processed = module
+        .process_output(&mut ctx, &output, &meta)
+        .await
+        .unwrap();
     assert_eq!(processed.amount, Some(Amount::from_msats(50_000)));
     assert!(processed.details.is_some());
 

@@ -5,8 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use deadpool_postgres::{Config, Pool, Runtime};
-use fedimint_core::config::{ClientConfig, GlobalClientConfig, PeerUrl};
-use fedimint_core::config::FederationId;
+use fedimint_core::config::{ClientConfig, FederationId, GlobalClientConfig, PeerUrl};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::CoreConsensusVersion;
 use fedimint_core::PeerId;
@@ -30,7 +29,9 @@ pub async fn reset_db(pool: &Pool) {
     conn.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         .await
         .unwrap();
-    crate::db::migrations::setup_core_schema(pool).await.unwrap();
+    crate::db::migrations::setup_core_schema(pool)
+        .await
+        .unwrap();
 }
 
 /// Minimal client config without any modules; enough for `ProcessCtx`.

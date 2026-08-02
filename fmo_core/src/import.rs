@@ -1,6 +1,5 @@
 use deadpool_postgres::Runtime;
-use fedimint_core::config::ClientConfig;
-use fedimint_core::config::FederationId;
+use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::Decodable;
 use fedimint_core::session_outcome::SessionOutcome;
 use tokio_postgres::NoTls;
@@ -16,11 +15,7 @@ use crate::registry::ModuleRegistry;
 /// structural ingest (here) and by module replay (once the server runs,
 /// since every module cursor starts at 0). Works for federations that are
 /// no longer reachable since no network access is needed.
-pub async fn import(
-    old_db: &str,
-    new_db: &str,
-    registry: &ModuleRegistry,
-) -> anyhow::Result<()> {
+pub async fn import(old_db: &str, new_db: &str, registry: &ModuleRegistry) -> anyhow::Result<()> {
     let (old, old_connection) = tokio_postgres::connect(old_db, NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = old_connection.await {
@@ -38,8 +33,8 @@ pub async fn import(
 
     crate::db::migrations::setup_core_schema(&pool).await?;
 
-    // 1. federations (raw config bytes are decodable across versions since
-    //    the encoding is consensus-critical)
+    // 1. federations (raw config bytes are decodable across versions since the
+    //    encoding is consensus-critical)
     let federation_rows = old
         .query("SELECT federation_id, config FROM federations", &[])
         .await?;
@@ -85,9 +80,9 @@ pub async fn import(
     dbtx.commit().await?;
     drop(conn);
 
-    // 3. raw sessions, re-ingested through the structural pipeline. This is
-    //    also the encoding round-trip check: any blob the current fedimint
-    //    version can't decode aborts the import with a precise error.
+    // 3. raw sessions, re-ingested through the structural pipeline. This is also
+    //    the encoding round-trip check: any blob the current fedimint version can't
+    //    decode aborts the import with a precise error.
     for (federation_id, config) in &federations {
         let old_session_count: i64 = old
             .query_one(
@@ -125,15 +120,21 @@ pub async fn import(
             for row in &rows {
                 let session_index: i32 = row.get(0);
                 let data: Vec<u8> = row.get(1);
-                let session = SessionOutcome::consensus_decode_whole(&data, &decoders)
-                    .map_err(|e| {
+                let session =
+                    SessionOutcome::consensus_decode_whole(&data, &decoders).map_err(|e| {
                         anyhow::anyhow!(
                             "failed to decode session {session_index} of federation \
                              {federation_id}: {e}"
                         )
                     })?;
-                ingest_session(&dbtx, config, *federation_id, session_index as u64, &session)
-                    .await?;
+                ingest_session(
+                    &dbtx,
+                    config,
+                    *federation_id,
+                    session_index as u64,
+                    &session,
+                )
+                .await?;
             }
             dbtx.commit().await?;
 

@@ -33,8 +33,9 @@ pub struct CiMeta {
 }
 
 /// Result of processing a transaction input or output. Core writes `amount`
-/// and `details` back into the global `transaction_inputs`/`transaction_outputs`
-/// tables; modules never write core tables directly.
+/// and `details` back into the global
+/// `transaction_inputs`/`transaction_outputs` tables; modules never write core
+/// tables directly.
 #[derive(Debug, Default)]
 pub struct ProcessedItem {
     pub amount: Option<Amount>,
@@ -136,7 +137,8 @@ pub trait ObserverModule: Send + Sync + 'static {
     /// recurring. Default: no background task.
     async fn run_federation_task(self: Arc<Self>, _ctx: ModuleTaskCtx) {}
 
-    /// Extra API routes, mounted at `/federations/:federation_id/modules/<kind>`.
+    /// Extra API routes, mounted at
+    /// `/federations/:federation_id/modules/<kind>`.
     fn api_router(&self) -> Option<axum::Router<crate::api::ModuleApiState>> {
         None
     }

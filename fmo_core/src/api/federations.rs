@@ -8,9 +8,7 @@ use fedimint_core::config::{FederationId, JsonClientConfig};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::Amount;
-use fmo_api_types::{
-    FederationActivity, FederationHealth, FederationSummary, FedimintTotals,
-};
+use fmo_api_types::{FederationActivity, FederationHealth, FederationSummary, FedimintTotals};
 use futures::future::join_all;
 use postgres_from_row::FromRow;
 use serde::Deserialize;
@@ -48,7 +46,10 @@ pub fn get_federations_routes() -> Router<AppState> {
             "/:federation_id/transactions/histogram",
             get(super::transactions::transaction_histogram),
         )
-        .route("/:federation_id/sessions", get(super::sessions::list_sessions))
+        .route(
+            "/:federation_id/sessions",
+            get(super::sessions::list_sessions),
+        )
         .route(
             "/:federation_id/sessions/count",
             get(super::sessions::count_sessions),
@@ -176,10 +177,7 @@ async fn backfill_federation(
         .execute(
             "UPDATE module_progress SET next_session_index = LEAST(next_session_index, $2)
              WHERE federation_id = $1",
-            &[
-                &federation_id.consensus_encode_to_vec(),
-                &session_start,
-            ],
+            &[&federation_id.consensus_encode_to_vec(), &session_start],
         )
         .await
         .map_err(anyhow::Error::from)?;
@@ -201,10 +199,7 @@ impl FederationObserver {
 
                 let name = self
                     .consensus_meta_cache()
-                    .fetch_meta_cached(&config_to_json(
-                        federation.config.clone(),
-                        self.registry(),
-                    )?)
+                    .fetch_meta_cached(&config_to_json(federation.config.clone(), self.registry())?)
                     .await
                     .and_then(|meta| meta.get_as::<String>("federation_name"))
                     .or_else(|| {

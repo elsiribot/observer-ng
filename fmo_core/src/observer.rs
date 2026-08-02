@@ -71,14 +71,12 @@ impl FederationObserver {
             observer.spawn_federation(federation);
         }
 
-        observer.task_group.spawn_cancellable(
-            "fetch block times",
-            observer.clone().fetch_block_times(),
-        );
-        observer.task_group.spawn_cancellable(
-            "sync nostr events",
-            observer.clone().sync_nostr_events(),
-        );
+        observer
+            .task_group
+            .spawn_cancellable("fetch block times", observer.clone().fetch_block_times());
+        observer
+            .task_group
+            .spawn_cancellable("sync nostr events", observer.clone().sync_nostr_events());
         observer
             .task_group
             .spawn_cancellable("refresh views", observer.clone().refresh_views());

@@ -48,9 +48,7 @@ async fn fetch_federation_config(
         .into())
 }
 
-async fn fetch_federation_id(
-    Path(invite): Path<InviteCode>,
-) -> Result<Json<FederationId>> {
+async fn fetch_federation_id(Path(invite): Path<InviteCode>) -> Result<Json<FederationId>> {
     Ok(invite.federation_id().into())
 }
 

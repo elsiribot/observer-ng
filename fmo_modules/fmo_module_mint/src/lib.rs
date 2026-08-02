@@ -11,9 +11,7 @@ use fedimint_core::module::CommonModuleInit;
 use fedimint_mint_common::{MintCommonInit, MintConsensusItem, MintInput, MintOutput};
 use fmo_api_types::{NonceSpendInfo, NoncesRequest};
 use fmo_core::api::ModuleApiState;
-use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
-};
+use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use fmo_core::query::query;
 use postgres_from_row::FromRow;
 use tracing::warn;

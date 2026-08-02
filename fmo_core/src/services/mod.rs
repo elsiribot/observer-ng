@@ -28,7 +28,8 @@ impl CoreServices {
         Ok(esplora_client::Builder::new(&self.mempool_url).build_async()?)
     }
 
-    /// Timestamp of the given block height, if already synced into `block_times`.
+    /// Timestamp of the given block height, if already synced into
+    /// `block_times`.
     pub async fn block_time(&self, height: u32) -> anyhow::Result<Option<chrono::NaiveDateTime>> {
         query_value::<Option<chrono::NaiveDateTime>>(
             &self.pool.get().await?,

@@ -3,12 +3,10 @@ use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, 
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_lnv2_common::{
-    LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputV0,
-    LightningOutput, LightningOutputV0,
+    LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputV0, LightningOutput,
+    LightningOutputV0,
 };
-use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
-};
+use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use tracing::warn;
 
 /// Observer module for the next-generation fedimint `lnv2` lightning module:

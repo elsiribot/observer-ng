@@ -65,18 +65,27 @@ just test_package fmo_server
 
 ### Workspace Structure
 - `fmo_api_types/` - Shared API types between frontend and backend
-- `fmo_server/` - Backend server (Axum + PostgreSQL)
-  - `/config/*` endpoints - Federation configuration API (stable)
-  - `/federations/*` endpoints - Federation monitoring API (unstable)
-  - Background tasks for monitoring federations and syncing data
+- `fmo_core/` - Module-agnostic observer core (library)
+  - `fetch.rs` - downloads raw sessions, stores them + structural facts (no module decoding)
+  - `ingest.rs` - structural ingest shared by fetcher and import tool
+  - `dispatch.rs` - decodes sessions and dispatches items to observer modules; per-module cursors make live processing and historical replay the same code path
+  - `module.rs` - the `ObserverModule` trait (decoder, own migrations, process_input/output/ci, background tasks, API router)
+  - `import.rs` - one-shot import from a pre-modularization (schema v8) database
+  - `services/` - block times, guardian health, nostr sync, meta caches
+  - `api/` - axum routers: core endpoints + module router mounting + `/config/*`
+  - `schema/core/v0.sql` - core schema (new lineage, append-only migrations)
+- `fmo_modules/fmo_module_{mint,wallet,ln,lnv2}/` - one crate per fedimint module kind, each owning Postgres schema `fmo_<kind>` with its own migration lineage
+- `fmo_server/` - thin binary: `FedimintObserverBuilder` + standard modules; `serve` and `import` subcommands; `examples/custom_fmo.rs` shows a custom build
 - `fmo_frontend_react/` - Frontend (React + TypeScript)
 
 ### Key Patterns
 1. **Shared Types**: All API types are defined in `fmo_api_types` and used by both frontend and backend
-2. **Database Migrations**: Version-controlled SQL migrations in `fmo_server/schema/` (v0-v8)
-3. **Background Monitoring**: `FederationObserver` spawns tasks to monitor multiple federations concurrently
-4. **State Management**: Backend uses shared app state with Arc/RwLock for thread safety
-5. **Error Handling**: Custom `AppError` type wrapping `anyhow::Error` for consistent error propagation
+2. **Three-layer data flow** (issue #8): fetch raw sessions → modules normalize into their own schemas → denormalize for the API (Rust-side, in-transaction, plus materialized views)
+3. **Per-module cursors**: `module_progress` tracks each module's processing position per federation; adding a module later or bumping its `version()` triggers schema drop + full replay from raw sessions — no refetching
+4. **Idempotent processing**: all inserts use `ON CONFLICT DO NOTHING` so crash-resume and replay are safe
+5. **Graceful unknown data**: unknown module kinds/versions are stored raw/JSON, never panic; a failing module only stalls itself
+6. **Module API routes**: mounted at `/federations/:federation_id/modules/<kind>/…` with compat aliases at historical paths (`/utxos`, `/nonces/spend`, `/gateways`)
+7. **Error Handling**: `AppError` type wrapping `anyhow::Error` in `fmo_core::error`
 
 ### Environment Configuration
 Required environment variables (see `sample.env`):
@@ -85,16 +94,22 @@ Required environment variables (see `sample.env`):
 - `FO_ADMIN_AUTH`: Admin authentication password
 - `FO_MEMPOOL_URL`: Mempool API URL (default: "https://mempool.space/api")
 - `ALLOW_CONFIG_CORS`: Enable CORS for config endpoints
+- `FO_REFRESH_INTERVAL_SECS`: Materialized view refresh interval (default 60)
+- `FO_GATEWAY_POLL_SECS`: LN gateway poll interval (default 300)
 
 ### API Endpoints
 - **Config API** (`/config/*`): Stable API for federation configuration inspection
 - **Federations API** (`/federations/*`): Unstable API for federation monitoring data
+- **Module APIs** (`/federations/:id/modules/<kind>/*`): Module-provided endpoints
 - **Admin endpoints**: Require bearer token authentication via `FO_ADMIN_AUTH`
 
 ### Database Schema
-PostgreSQL with materialized views and complex indexes. Key tables:
+PostgreSQL; core schema in `public`, one schema per observer module (`fmo_mint`, `fmo_wallet`, `fmo_ln`, `fmo_lnv2`). Key core tables:
 - `federations` - Federation configurations
-- `sessions` - Consensus sessions
-- `transactions` - Transaction records
-- `guardian_health_*` - Guardian monitoring data
-- `nostr_*` - Nostr protocol integration
+- `sessions` - Raw consensus sessions (bronze layer, append-only)
+- `transactions`, `transaction_inputs/outputs`, `consensus_items` - structural facts; `amount_msat`/`details` filled by module dispatch
+- `module_progress`, `module_versions` - per-module replay cursors and versions
+- `session_time_votes` + `session_times` matview - session timestamps contributed by modules (wallet block votes, lnv2 time votes)
+- `guardian_health`, `nostr_*`, `block_times` - core services
+
+Old (pre-modularization, schema v8) databases are NOT migrated in place; use `fmo_server import --from <old-db-url>` to copy raw data into a fresh database and let module replay rebuild the rest.

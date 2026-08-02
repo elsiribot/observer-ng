@@ -10,8 +10,7 @@ use fedimint_core::module::CommonModuleInit;
 use fedimint_core::Amount;
 use fedimint_ln_common::contracts::{Contract, IdentifiableContract};
 use fedimint_ln_common::{
-    LightningCommonInit, LightningConsensusItem, LightningInput, LightningOutput,
-    LightningOutputV0,
+    LightningCommonInit, LightningConsensusItem, LightningInput, LightningOutput, LightningOutputV0,
 };
 use fmo_core::api::ModuleApiState;
 use fmo_core::module::{

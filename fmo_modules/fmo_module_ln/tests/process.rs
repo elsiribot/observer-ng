@@ -22,14 +22,18 @@ async fn ln_input_records_contract_and_amount() {
 
     let module = LnObserver;
     assert_eq!(module.kind(), ModuleKind::from_static_str("ln"));
-    fmo_core::db::migrations::setup_module_schema(&pool, "ln", module.version(), module.migrations())
-        .await
-        .unwrap();
-
-    let contract_id = ContractId::from_str(
-        "1111111111111111111111111111111111111111111111111111111111111111",
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "ln",
+        module.version(),
+        module.migrations(),
     )
+    .await
     .unwrap();
+
+    let contract_id =
+        ContractId::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+            .unwrap();
     let input = LightningInput::V0(LightningInputV0 {
         contract_id,
         amount: Amount::from_msats(1234),
@@ -43,12 +47,9 @@ async fn ln_input_records_contract_and_amount() {
     // FK targets: transactions + transaction_inputs rows must exist
     {
         let conn = pool.get().await.unwrap();
-        conn.execute(
-            "INSERT INTO sessions VALUES ($1, 0, ''::bytea)",
-            &[&fed],
-        )
-        .await
-        .unwrap();
+        conn.execute("INSERT INTO sessions VALUES ($1, 0, ''::bytea)", &[&fed])
+            .await
+            .unwrap();
         conn.execute(
             "INSERT INTO transactions VALUES ($1, $2, 0, 0, ''::bytea)",
             &[&fed, &txid.consensus_encode_to_vec()],

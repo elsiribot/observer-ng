@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use axum::extract::State;
 use axum::routing::{get, put};
 use axum::{Json, Router};
+pub use config::FederationConfigCache;
 use deadpool_postgres::Pool;
 use fedimint_core::config::FederationId;
 use fedimint_core::invite_code::InviteCode;
@@ -19,8 +20,6 @@ use tracing::{debug, info, warn};
 use crate::observer::FederationObserver;
 use crate::services::meta::MetaOverrideCache;
 use crate::services::CoreServices;
-
-pub use config::FederationConfigCache;
 
 /// State available to core API handlers.
 #[derive(Clone)]
@@ -46,10 +45,7 @@ pub struct ModuleApiState {
 /// `/federations/:federation_id/utxos`) to a (module kind, module route
 /// prefix) pair; the module's router is mounted a second time under the
 /// public prefix.
-pub fn build_router(
-    observer: FederationObserver,
-    compat_routes: &[(String, String)],
-) -> Router {
+pub fn build_router(observer: FederationObserver, compat_routes: &[(String, String)]) -> Router {
     let module_state = ModuleApiState {
         pool: observer.pool().clone(),
         services: observer.services().clone(),

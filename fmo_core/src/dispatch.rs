@@ -49,10 +49,8 @@ pub async fn process_pending(
         return Ok(0);
     };
 
-    let mut cursors: BTreeMap<ModuleKind, i32> = registry
-        .iter()
-        .map(|(kind, _)| (kind.clone(), 0))
-        .collect();
+    let mut cursors: BTreeMap<ModuleKind, i32> =
+        registry.iter().map(|(kind, _)| (kind.clone(), 0)).collect();
     for row in conn
         .query(
             "SELECT module_kind, next_session_index FROM module_progress WHERE federation_id = $1",
@@ -90,8 +88,7 @@ pub async fn process_pending(
 
     for row in rows {
         let session_index: i32 = row.get(0);
-        let session =
-            SessionOutcome::consensus_decode_whole(&row.get::<_, Vec<u8>>(1), &decoders)?;
+        let session = SessionOutcome::consensus_decode_whole(&row.get::<_, Vec<u8>>(1), &decoders)?;
 
         for (kind, module) in registry.iter() {
             if cursors.get(kind).copied().unwrap_or(0) != session_index {
@@ -143,9 +140,7 @@ pub async fn process_pending(
         }
     }
 
-    debug!(
-        "Processed {processed} (module, session) units for federation {federation_id}"
-    );
+    debug!("Processed {processed} (module, session) units for federation {federation_id}");
     Ok(processed)
 }
 
@@ -205,8 +200,7 @@ async fn dispatch_session_to_module(
                 }
 
                 for (out_index, output) in transaction.outputs.iter().enumerate() {
-                    if instance_to_kind(config, output.module_instance_id())
-                        != module_kind.as_str()
+                    if instance_to_kind(config, output.module_instance_id()) != module_kind.as_str()
                     {
                         continue;
                     }
@@ -235,8 +229,7 @@ async fn dispatch_session_to_module(
                 }
             }
             ConsensusItem::Module(module_ci) => {
-                if instance_to_kind(config, module_ci.module_instance_id())
-                    != module_kind.as_str()
+                if instance_to_kind(config, module_ci.module_instance_id()) != module_kind.as_str()
                 {
                     continue;
                 }
@@ -279,15 +272,8 @@ pub async fn run_processor(
     config: ClientConfig,
 ) -> anyhow::Result<()> {
     loop {
-        let processed = process_pending(
-            &pool,
-            &registry,
-            &services,
-            federation_id,
-            &config,
-            100,
-        )
-        .await?;
+        let processed =
+            process_pending(&pool, &registry, &services, federation_id, &config, 100).await?;
         if processed == 0 {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
