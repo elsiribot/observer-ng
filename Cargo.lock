@@ -2060,6 +2060,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmo_module_wallet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bitcoin 0.32.8",
+ "chrono",
+ "deadpool-postgres",
+ "esplora-client",
+ "fedimint-core",
+ "fedimint-wallet-common",
+ "fmo_api_types",
+ "fmo_core",
+ "postgres-from-row",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fmo_server"
 version = "0.2.0"
 dependencies = [
