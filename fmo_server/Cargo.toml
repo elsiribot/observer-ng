@@ -25,6 +25,7 @@ esplora-client = { version = "0.10.0", default-features = false, features = [
     "async-https-rustls",
 ] }
 fmo_api_types = { path = "../fmo_api_types" }
+fmo_core = { path = "../fmo_core" }
 futures = "0.3.30"
 hex = "0.4.3"
 nostr-sdk = "0.34.0"

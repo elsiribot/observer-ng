@@ -2188,6 +2188,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmo_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "deadpool-postgres",
+ "esplora-client",
+ "fedimint-api-client",
+ "fedimint-connectors",
+ "fedimint-core 0.10.0",
+ "fmo_api_types",
+ "futures",
+ "postgres-from-row",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
 name = "fmo_server"
 version = "0.2.0"
 dependencies = [
@@ -2210,6 +2233,7 @@ dependencies = [
  "fedimint-mint-common",
  "fedimint-wallet-common",
  "fmo_api_types",
+ "fmo_core",
  "futures",
  "hex",
  "nostr-sdk",
