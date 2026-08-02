@@ -35,3 +35,32 @@ CREATE TABLE output_contracts
     FOREIGN KEY (federation_id, txid, out_index)
         REFERENCES public.transaction_outputs (federation_id, txid, out_index)
 );
+
+-- Gateway registrations announced to the federation's LN module, polled
+-- periodically (ported from PR #109 by bansalayush247)
+CREATE TABLE gateways
+(
+    federation_id   BYTEA       NOT NULL REFERENCES public.federations (federation_id),
+    gateway_id      TEXT        NOT NULL,
+    node_pub_key    TEXT        NOT NULL,
+    api_endpoint    TEXT        NOT NULL,
+    lightning_alias TEXT        NOT NULL,
+    vetted          BOOLEAN     NOT NULL DEFAULT FALSE,
+    raw             JSONB       NOT NULL,
+    first_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (federation_id, gateway_id)
+);
+CREATE INDEX gateways_federation_id ON gateways (federation_id);
+CREATE INDEX gateways_node_pub_key ON gateways (node_pub_key);
+
+CREATE TABLE gateway_poll_snapshots
+(
+    federation_id BYTEA       NOT NULL REFERENCES public.federations (federation_id),
+    gateway_id    TEXT        NOT NULL,
+    poll_time     TIMESTAMPTZ NOT NULL,
+    is_seen       BOOLEAN     NOT NULL,
+    PRIMARY KEY (federation_id, gateway_id, poll_time)
+);
+CREATE INDEX gateway_poll_snapshots_fed_time
+    ON gateway_poll_snapshots (federation_id, poll_time);

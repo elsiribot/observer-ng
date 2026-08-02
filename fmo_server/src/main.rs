@@ -56,6 +56,7 @@ fn builder() -> FedimintObserverBuilder {
         // so e.g. wallet's "/utxos" also answers at its historical path.
         .with_compat_route("/federations/:federation_id", "wallet")
         .with_compat_route("/federations/:federation_id", "mint")
+        .with_compat_route("/federations/:federation_id", "ln")
 }
 
 #[tokio::main]

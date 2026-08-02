@@ -243,6 +243,7 @@ impl FederationObserver {
                 config: federation.config.clone(),
                 pool: self.pool.clone(),
                 services: self.services.clone(),
+                connectors: self.connectors.clone(),
             };
             self.task_group.spawn_cancellable(
                 format!("Module {kind} task for {federation_id}"),

@@ -1,3 +1,9 @@
+mod gateways;
+
+use std::sync::Arc;
+
+use axum::routing::get;
+use axum::Router;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::CommonModuleInit;
@@ -7,8 +13,9 @@ use fedimint_ln_common::{
     LightningCommonInit, LightningConsensusItem, LightningInput, LightningOutput,
     LightningOutputV0,
 };
+use fmo_core::api::ModuleApiState;
 use fmo_core::module::{
-    CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem,
+    CiMeta, ItemMeta, Migration, ModuleTaskCtx, ObserverModule, ProcessCtx, ProcessedItem,
 };
 use tracing::warn;
 
@@ -157,5 +164,19 @@ impl ObserverModule for LnObserver {
         };
 
         Ok(serde_json::to_value(ln_ci).ok())
+    }
+
+    /// Polls the federation's gateway registry (ported from PR #109).
+    async fn run_federation_task(self: Arc<Self>, ctx: ModuleTaskCtx) {
+        if let Err(e) = gateways::monitor_gateways(ctx.clone()).await {
+            warn!(
+                "Gateway monitor for federation {} exited: {e:?}",
+                ctx.federation_id
+            );
+        }
+    }
+
+    fn api_router(&self) -> Option<Router<ModuleApiState>> {
+        Some(Router::new().route("/gateways", get(gateways::get_federation_gateways)))
     }
 }

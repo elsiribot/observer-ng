@@ -2034,6 +2034,7 @@ dependencies = [
  "chrono",
  "fedimint-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2075,12 +2076,16 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chrono",
  "deadpool-postgres",
+ "fedimint-api-client",
  "fedimint-core",
  "fedimint-ln-common",
  "fmo_api_types",
  "fmo_core",
+ "futures",
  "postgres-from-row",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

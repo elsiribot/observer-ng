@@ -85,6 +85,7 @@ pub struct ModuleTaskCtx {
     pub config: ClientConfig,
     pub pool: deadpool_postgres::Pool,
     pub services: Arc<CoreServices>,
+    pub connectors: fedimint_connectors::ConnectorRegistry,
 }
 
 /// An observer module understands the consensus items of one fedimint module

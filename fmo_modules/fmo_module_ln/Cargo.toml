@@ -7,8 +7,13 @@ edition = "2021"
 anyhow = "1.0.81"
 async-trait = "0.1"
 axum = { version = "0.7.5", features = ["json"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+fedimint-api-client = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-ln-common = { workspace = true }
+futures = "0.3.30"
+serde = { version = "1.0.197", features = ["derive"] }
+tokio = { version = "1.37.0", features = ["full"] }
 fmo_api_types = { path = "../../fmo_api_types" }
 fmo_core = { path = "../../fmo_core" }
 postgres-from-row = "0.5.2"
