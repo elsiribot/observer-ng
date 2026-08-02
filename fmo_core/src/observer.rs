@@ -79,6 +79,9 @@ impl FederationObserver {
             "sync nostr events",
             observer.clone().sync_nostr_events(),
         );
+        observer
+            .task_group
+            .spawn_cancellable("refresh views", observer.clone().refresh_views());
 
         Ok(observer)
     }

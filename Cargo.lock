@@ -2064,8 +2064,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "axum-auth",
  "chrono",
  "deadpool-postgres",
+ "dotenv",
  "esplora-client",
  "fedimint-api-client",
  "fedimint-connectors",
@@ -2083,6 +2085,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "tower-http 0.5.2",
  "tracing",
 ]
 

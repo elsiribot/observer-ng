@@ -29,6 +29,7 @@ pub struct ServerOpts {
 #[derive(Default)]
 pub struct FedimintObserverBuilder {
     modules: Vec<Arc<dyn ObserverModule>>,
+    compat_routes: Vec<(String, String)>,
 }
 
 impl FedimintObserverBuilder {
@@ -38,6 +39,20 @@ impl FedimintObserverBuilder {
 
     pub fn with_module(mut self, module: impl ObserverModule) -> Self {
         self.modules.push(Arc::new(module));
+        self
+    }
+
+    /// Additionally exposes the API router of the module of the given kind
+    /// under `public_prefix` (e.g. keep `/federations/:federation_id/utxos`
+    /// working while the canonical path is
+    /// `/federations/:federation_id/modules/wallet/utxos`).
+    pub fn with_compat_route(
+        mut self,
+        public_prefix: impl Into<String>,
+        module_kind: impl Into<String>,
+    ) -> Self {
+        self.compat_routes
+            .push((public_prefix.into(), module_kind.into()));
         self
     }
 
@@ -58,7 +73,7 @@ impl FedimintObserverBuilder {
         )
         .await?;
 
-        let app = crate::api::build_router(observer);
+        let app = crate::api::build_router(observer, &self.compat_routes);
 
         let listener = tokio::net::TcpListener::bind(&opts.bind)
             .await
