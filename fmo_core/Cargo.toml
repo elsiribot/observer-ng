@@ -42,4 +42,4 @@ tracing = "0.1.40"
 test-util = []
 
 [dev-dependencies]
-fedimint-dummy-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
+fedimint-dummy-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }

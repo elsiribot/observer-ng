@@ -12,11 +12,13 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-fedimint-api-client = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-connectors = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-core = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-ln-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-lnv2-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-meta-client = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-mint-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
-fedimint-wallet-common = { version = "0.10.0", git = "https://github.com/fedimint/fedimint", tag = "v0.10.0" }
+fedimint-api-client = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-connectors = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-core = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-ln-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-lnv2-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-meta-client = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-mint-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-mintv2-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-wallet-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }
+fedimint-walletv2-common = { version = "0.11.1", git = "https://github.com/fedimint/fedimint", tag = "v0.11.1" }

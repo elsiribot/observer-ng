@@ -15,9 +15,7 @@ use fedimint_core::session_outcome::{AcceptedItem, SessionOutcome};
 use fedimint_core::transaction::{Transaction, TransactionSignature};
 use fedimint_core::{Amount, PeerId};
 use fedimint_dummy_common::config::DummyClientConfig;
-use fedimint_dummy_common::{
-    DummyConsensusItem, DummyInput, DummyInputV1, DummyOutput, DummyOutputV1,
-};
+use fedimint_dummy_common::{DummyConsensusItem, DummyInput, DummyOutput};
 use tokio_postgres::NoTls;
 
 /// Tests share one database; serialize DB-touching tests within a binary.
@@ -70,9 +68,7 @@ pub fn dummy_config() -> (ClientConfig, FederationId) {
                 DUMMY_INSTANCE_ID,
                 ModuleKind::from_static_str("dummy"),
                 ModuleConsensusVersion::new(2, 0),
-                DummyClientConfig {
-                    tx_fee: Amount::ZERO,
-                },
+                DummyClientConfig,
             )
             .expect("valid module config"),
         )]),
@@ -91,17 +87,16 @@ fn account_key() -> fedimint_core::secp256k1::PublicKey {
 /// A session with one dummy transaction (1 input, 1 output) and one dummy CI.
 pub fn dummy_session(amount_msat: u64) -> SessionOutcome {
     let transaction = Transaction {
-        inputs: vec![DummyInput::V0(DummyInputV1 {
+        inputs: vec![DummyInput {
             amount: Amount::from_msats(amount_msat),
             unit: AmountUnit::BITCOIN,
-            account: account_key(),
-        })
+            pub_key: account_key(),
+        }
         .into_dyn(DUMMY_INSTANCE_ID)],
-        outputs: vec![DummyOutput::V0(DummyOutputV1 {
+        outputs: vec![DummyOutput {
             amount: Amount::from_msats(amount_msat),
             unit: AmountUnit::BITCOIN,
-            account: account_key(),
-        })
+        }
         .into_dyn(DUMMY_INSTANCE_ID)],
         nonce: amount_msat.to_le_bytes(),
         signatures: TransactionSignature::NaiveMultisig(vec![]),
