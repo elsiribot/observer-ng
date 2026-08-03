@@ -1,0 +1,21 @@
+[package]
+name = "fmo_module_walletv2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.81"
+async-trait = "0.1"
+axum = { version = "0.7.5", features = ["json"] }
+bitcoin = "0.32.5"
+chrono = { version = "0.4.38", features = ["serde"] }
+fedimint-core = { workspace = true }
+fedimint-walletv2-common = { workspace = true }
+fmo_core = { path = "../../fmo_core" }
+serde_json = "1.0.115"
+tracing = "0.1.40"
+
+[dev-dependencies]
+deadpool-postgres = "0.14.0"
+fmo_core = { path = "../../fmo_core", features = ["test-util"] }
+tokio = { version = "1.37.0", features = ["full"] }

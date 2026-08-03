@@ -12,6 +12,7 @@ fmo_module_ln = { path = "../fmo_modules/fmo_module_ln" }
 fmo_module_lnv2 = { path = "../fmo_modules/fmo_module_lnv2" }
 fmo_module_mint = { path = "../fmo_modules/fmo_module_mint" }
 fmo_module_wallet = { path = "../fmo_modules/fmo_module_wallet" }
+fmo_module_walletv2 = { path = "../fmo_modules/fmo_module_walletv2" }
 tokio = { version = "1.37.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

@@ -23,7 +23,7 @@ module kind interprets that module's data.
     the raw sessions, no re-fetching needed.
   * *Core services*: block time sync, guardian health monitoring, nostr federation/vote sync, meta
     fetching, and the HTTP API framework.
-* **`fmo_modules/fmo_module_{mint,wallet,ln,lnv2}`** — one crate per fedimint module kind. Each implements
+* **`fmo_modules/fmo_module_{mint,wallet,walletv2,ln,lnv2}`** — one crate per fedimint module kind. Each implements
   the `ObserverModule` trait: it provides its decoder, owns a Postgres schema (`fmo_<kind>`) with its own
   migration lineage, normalizes inputs/outputs/consensus items into it, and can register per-federation
   background tasks (e.g. LN gateway polling) and API routes under

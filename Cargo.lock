@@ -2155,6 +2155,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fedimint-walletv2-common"
+version = "0.11.1"
+source = "git+https://github.com/fedimint/fedimint?tag=v0.11.1#2620789610a2c65c1068de973ebb5657d08d549d"
+dependencies = [
+ "anyhow",
+ "bitcoin 0.32.102",
+ "fedimint-core",
+ "miniscript",
+ "secp256k1 0.29.1",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2311,6 +2325,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fmo_module_walletv2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "bitcoin 0.32.102",
+ "chrono",
+ "deadpool-postgres",
+ "fedimint-core",
+ "fedimint-walletv2-common",
+ "fmo_core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fmo_server"
 version = "0.2.0"
 dependencies = [
@@ -2322,6 +2354,7 @@ dependencies = [
  "fmo_module_lnv2",
  "fmo_module_mint",
  "fmo_module_wallet",
+ "fmo_module_walletv2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7254,7 +7287,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

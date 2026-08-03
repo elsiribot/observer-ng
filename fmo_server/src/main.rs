@@ -49,6 +49,7 @@ fn builder() -> FedimintObserverBuilder {
     FedimintObserverBuilder::new()
         .with_module(fmo_module_mint::MintObserver)
         .with_module(fmo_module_wallet::WalletObserver)
+        .with_module(fmo_module_walletv2::WalletV2Observer)
         .with_module(fmo_module_ln::LnObserver)
         .with_module(fmo_module_lnv2::LnV2Observer)
         // Legacy paths kept for the React frontend: module routers are
