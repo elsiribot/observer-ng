@@ -17,12 +17,19 @@ use crate::registry::ModuleRegistry;
 /// since every module cursor starts at 0). Works for federations that are
 /// no longer reachable since no network access is needed.
 pub async fn import(old_db: &str, new_db: &str, registry: &ModuleRegistry) -> anyhow::Result<()> {
-    let (old, old_connection) = tokio_postgres::connect(old_db, NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(e) = old_connection.await {
-            tracing::error!("old DB connection error: {e}");
-        }
-    });
+    // Go through deadpool for the old DB as well: unlike raw
+    // tokio_postgres::connect it falls back to the standard unix socket
+    // directories when the DSN names no host, so the same DSN style works
+    // for --from and --database.
+    let old_pool = {
+        let pool_config = deadpool_postgres::Config {
+            url: Some(old_db.to_owned()),
+            pool: Some(deadpool_postgres::PoolConfig::new(1)),
+            ..Default::default()
+        };
+        pool_config.create_pool(Some(Runtime::Tokio1), NoTls)
+    }?;
+    let old = old_pool.get().await?;
 
     let pool = {
         let pool_config = deadpool_postgres::Config {

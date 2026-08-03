@@ -96,13 +96,13 @@ pub fn dummy_session(amount_msat: u64) -> SessionOutcome {
             unit: AmountUnit::BITCOIN,
             account: account_key(),
         })
-        .into_dyn(DUMMY_INSTANCE_ID.into())],
+        .into_dyn(DUMMY_INSTANCE_ID)],
         outputs: vec![DummyOutput::V0(DummyOutputV1 {
             amount: Amount::from_msats(amount_msat),
             unit: AmountUnit::BITCOIN,
             account: account_key(),
         })
-        .into_dyn(DUMMY_INSTANCE_ID.into())],
+        .into_dyn(DUMMY_INSTANCE_ID)],
         nonce: amount_msat.to_le_bytes(),
         signatures: TransactionSignature::NaiveMultisig(vec![]),
     };
@@ -114,7 +114,7 @@ pub fn dummy_session(amount_msat: u64) -> SessionOutcome {
                 peer: PeerId::from(0),
             },
             AcceptedItem {
-                item: ConsensusItem::Module(DummyConsensusItem.into_dyn(DUMMY_INSTANCE_ID.into())),
+                item: ConsensusItem::Module(DummyConsensusItem.into_dyn(DUMMY_INSTANCE_ID)),
                 peer: PeerId::from(0),
             },
         ],
