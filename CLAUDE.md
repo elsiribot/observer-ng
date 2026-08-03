@@ -74,7 +74,7 @@ just test_package fmo_server
   - `services/` - block times, guardian health, nostr sync, meta caches
   - `api/` - axum routers: core endpoints + module router mounting + `/config/*`
   - `schema/core/v0.sql` - core schema (new lineage, append-only migrations)
-- `fmo_modules/fmo_module_{mint,wallet,walletv2,ln,lnv2}/` - one crate per fedimint module kind, each owning Postgres schema `fmo_<kind>` with its own migration lineage
+- `fmo_modules/fmo_module_{mint,mintv2,wallet,walletv2,ln,lnv2}/` - one crate per fedimint module kind, each owning Postgres schema `fmo_<kind>` with its own migration lineage
 - `fmo_server/` - thin binary: `FedimintObserverBuilder` + standard modules; `serve` and `import` subcommands; `examples/custom_fmo.rs` shows a custom build
 - `fmo_frontend_react/` - Frontend (React + TypeScript)
 
@@ -104,7 +104,7 @@ Required environment variables (see `sample.env`):
 - **Admin endpoints**: Require bearer token authentication via `FO_ADMIN_AUTH`
 
 ### Database Schema
-PostgreSQL; core schema in `public`, one schema per observer module (`fmo_mint`, `fmo_wallet`, `fmo_walletv2`, `fmo_ln`, `fmo_lnv2`). Key core tables:
+PostgreSQL; core schema in `public`, one schema per observer module (`fmo_mint`, `fmo_mintv2`, `fmo_wallet`, `fmo_walletv2`, `fmo_ln`, `fmo_lnv2`). Key core tables:
 - `federations` - Federation configurations
 - `sessions` - Raw consensus sessions (bronze layer, append-only)
 - `transactions`, `transaction_inputs/outputs`, `consensus_items` - structural facts; `amount_msat`/`details` filled by module dispatch
