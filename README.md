@@ -87,7 +87,8 @@ fmo_server serve
 The import verifies per-federation session counts and works for federations that no longer exist, since no
 network access is needed. The import is resumable (re-run it after an interruption) and tolerates a server
 that is already fetching newer sessions concurrently. Keep the old database around as a backup until the
-new instance is verified.
+new instance is verified. If the server was already running during the import, restart it afterwards: a
+running server only picks up federations at startup or when they are added via the admin API.
 
 For the initial import + replay of a large history, two settings make a big difference (the bottleneck is
 WAL fsync volume, not CPU):
