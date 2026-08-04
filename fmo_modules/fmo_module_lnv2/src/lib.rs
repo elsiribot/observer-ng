@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
+use fedimint_core::Amount;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_lnv2_common::{
     LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputV0, LightningOutput,
@@ -27,7 +28,7 @@ impl ObserverModule for LnV2Observer {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn migrations(&self) -> &'static [Migration] {
@@ -74,12 +75,35 @@ impl ObserverModule for LnV2Observer {
             )
             .await?;
 
-        // LNv2 inputs don't carry an amount themselves; the funding contract's
-        // amount is recorded when the contract output is processed.
-        Ok(ProcessedItem {
-            amount: None,
-            details: serde_json::to_value(lnv2_input).ok(),
-        })
+        // LNv2 inputs don't carry an amount in their consensus encoding, but
+        // the funding contract does and is always processed before any claim
+        // of it, so resolve the amount from our own contracts table. Marked
+        // via details.amount_source so consumers can tell resolved amounts
+        // from consensus-carried ones.
+        let amount = ctx
+            .dbtx
+            .query_opt(
+                "SELECT amount_msat FROM contracts
+                 WHERE federation_id = $1 AND txid = $2 AND out_index = $3",
+                &[
+                    &meta.federation_id.consensus_encode_to_vec(),
+                    &outpoint.txid.consensus_encode_to_vec(),
+                    &(outpoint.out_idx as i32),
+                ],
+            )
+            .await?
+            .map(|row| Amount::from_msats(row.get::<_, i64>(0) as u64));
+
+        let details = serde_json::to_value(lnv2_input).ok().map(|mut value| {
+            if amount.is_some() {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("amount_source".to_owned(), "contract".into());
+                }
+            }
+            value
+        });
+
+        Ok(ProcessedItem { amount, details })
     }
 
     async fn process_output(

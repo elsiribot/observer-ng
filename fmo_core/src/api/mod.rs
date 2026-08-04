@@ -143,6 +143,15 @@ impl FederationObserver {
         }
 
         let conn = self.connection().await?;
+
+        // Before refreshing the aggregates, fill in amounts that only balance
+        // inference can provide, so histograms/totals include them.
+        let (inferred_inputs, inferred_outputs) =
+            crate::amounts::infer_missing_amounts(&conn).await?;
+        if inferred_inputs > 0 || inferred_outputs > 0 {
+            debug!("Inferred amounts for {inferred_inputs} inputs and {inferred_outputs} outputs");
+        }
+
         for matview in matviews {
             conn.batch_execute(&format!("REFRESH MATERIALIZED VIEW CONCURRENTLY {matview}"))
                 .await?;
