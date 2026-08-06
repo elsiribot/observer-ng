@@ -77,6 +77,22 @@ impl ProcessCtx<'_> {
             .await?;
         Ok(())
     }
+
+    /// Timestamp of the given block height, if already synced into
+    /// `block_times`. Runs on the processing transaction: process hooks must
+    /// NEVER take a second connection from the pool — with every federation
+    /// processor holding a batch transaction, waiting for another connection
+    /// deadlocks the whole pool.
+    pub async fn block_time(&self, height: u32) -> anyhow::Result<Option<chrono::NaiveDateTime>> {
+        Ok(self
+            .dbtx
+            .query_one(
+                "SELECT MAX(timestamp) FROM public.block_times WHERE block_height = $1",
+                &[&(height as i32)],
+            )
+            .await?
+            .get(0))
+    }
 }
 
 /// Context for module-owned per-federation background tasks.

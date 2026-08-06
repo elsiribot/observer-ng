@@ -153,7 +153,7 @@ impl ObserverModule for WalletV2Observer {
 
             // Height votes are our best estimate of when a session happened;
             // contribute them to the core session time votes.
-            if let Some(timestamp) = ctx.services.block_time(*height_vote as u32).await? {
+            if let Some(timestamp) = ctx.block_time(*height_vote as u32).await? {
                 ctx.record_session_time_vote(&KIND, meta.session_index, meta.peer, timestamp)
                     .await?;
             }

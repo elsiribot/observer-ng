@@ -30,6 +30,12 @@ impl CoreServices {
 
     /// Timestamp of the given block height, if already synced into
     /// `block_times`.
+    ///
+    /// Takes a connection from the pool: safe from background tasks, but must
+    /// NOT be called from `process_input`/`process_output`/`process_ci` —
+    /// those hold a pooled transaction already and a second acquisition can
+    /// deadlock the pool once enough federations process concurrently. Use
+    /// `ProcessCtx::block_time` there instead.
     pub async fn block_time(&self, height: u32) -> anyhow::Result<Option<chrono::NaiveDateTime>> {
         query_value::<Option<chrono::NaiveDateTime>>(
             &self.pool.get().await?,

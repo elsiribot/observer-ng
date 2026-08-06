@@ -177,7 +177,7 @@ impl ObserverModule for LnV2Observer {
                 }
             }
             LightningConsensusItem::BlockCountVote(height_vote) => {
-                if let Some(timestamp) = ctx.services.block_time(*height_vote as u32).await? {
+                if let Some(timestamp) = ctx.block_time(*height_vote as u32).await? {
                     ctx.record_session_time_vote(&KIND, meta.session_index, meta.peer, timestamp)
                         .await?;
                 }

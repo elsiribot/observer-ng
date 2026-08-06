@@ -96,6 +96,7 @@ Required environment variables (see `sample.env`):
 - `ALLOW_CONFIG_CORS`: Enable CORS for config endpoints
 - `FO_REFRESH_INTERVAL_SECS`: Materialized view refresh interval (default 60)
 - `FO_GATEWAY_POLL_SECS`: LN gateway poll interval (default 300)
+- `FO_DB_POOL_SIZE`: DB connection pool size (default 32; raise when observing many federations, keep below postgres max_connections)
 
 ### API Endpoints
 - **Config API** (`/config/*`): Stable API for federation configuration inspection

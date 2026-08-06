@@ -40,11 +40,19 @@ impl FederationObserver {
         registry: ModuleRegistry,
     ) -> anyhow::Result<FederationObserver> {
         let pool = {
+            // Sized for many federations processing concurrently; the
+            // deadpool default (10) starves the per-federation tasks. Every
+            // federation keeps roughly two connections busy while catching up
+            // (fetcher + processor), so scale via FO_DB_POOL_SIZE together
+            // with PostgreSQL's max_connections when observing many
+            // federations.
+            let pool_size = std::env::var("FO_DB_POOL_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(32);
             let pool_config = deadpool_postgres::Config {
                 url: Some(database.to_owned()),
-                // Sized for many federations processing concurrently; the
-                // deadpool default (10) starves the per-federation tasks.
-                pool: Some(deadpool_postgres::PoolConfig::new(32)),
+                pool: Some(deadpool_postgres::PoolConfig::new(pool_size)),
                 ..Default::default()
             };
             pool_config.create_pool(Some(Runtime::Tokio1), NoTls)
