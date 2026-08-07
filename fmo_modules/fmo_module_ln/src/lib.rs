@@ -36,13 +36,17 @@ impl ObserverModule for LnObserver {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn migrations(&self) -> &'static [Migration] {
         &[Migration {
             sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v0.sql")),
         }]
+    }
+
+    fn matviews(&self) -> &'static [&'static str] {
+        &["fmo_ln.contract_decryption"]
     }
 
     async fn process_input(
@@ -153,14 +157,33 @@ impl ObserverModule for LnObserver {
 
     async fn process_ci(
         &self,
-        _ctx: &mut ProcessCtx<'_>,
+        ctx: &mut ProcessCtx<'_>,
         ci: &DynModuleConsensusItem,
-        _meta: &CiMeta,
+        meta: &CiMeta,
     ) -> anyhow::Result<Option<serde_json::Value>> {
         let Some(ln_ci) = ci.as_any().downcast_ref::<LightningConsensusItem>() else {
             warn!("could not downcast ln CI (check decoders registry). {ci:?}");
             return Ok(None);
         };
+
+        // Record preimage decryption shares so decryption progress/timing per
+        // incoming contract is queryable (see the `contract_decryption`
+        // matview). One share per guardian per contract; idempotent on replay.
+        if let LightningConsensusItem::DecryptPreimage(contract_id, _share) = ln_ci {
+            ctx.dbtx
+                .execute(
+                    "INSERT INTO decryption_shares VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT DO NOTHING",
+                    &[
+                        &meta.federation_id.consensus_encode_to_vec(),
+                        &contract_id.consensus_encode_to_vec(),
+                        &(meta.peer.to_usize() as i32),
+                        &(meta.session_index as i32),
+                        &(meta.item_index as i32),
+                    ],
+                )
+                .await?;
+        }
 
         Ok(serde_json::to_value(ln_ci).ok())
     }

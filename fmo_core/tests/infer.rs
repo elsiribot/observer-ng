@@ -142,7 +142,9 @@ async fn balance_inference_fills_single_unknown_items() {
     )
     .await;
 
-    let (inputs, outputs) = fmo_core::amounts::infer_missing_amounts(&conn).await.unwrap();
+    let (inputs, outputs) = fmo_core::amounts::infer_missing_amounts(&conn)
+        .await
+        .unwrap();
     assert_eq!((inputs, outputs), (1, 1));
 
     assert_eq!(input_amount(&conn, b"tx_claim").await, Some(1500));
@@ -165,7 +167,9 @@ async fn balance_inference_fills_single_unknown_items() {
     assert_eq!(out_details.unwrap()["inferred"], serde_json::json!(true));
 
     // Idempotent: a second run finds nothing new and changes nothing.
-    let (inputs, outputs) = fmo_core::amounts::infer_missing_amounts(&conn).await.unwrap();
+    let (inputs, outputs) = fmo_core::amounts::infer_missing_amounts(&conn)
+        .await
+        .unwrap();
     assert_eq!((inputs, outputs), (0, 0));
     assert_eq!(input_amount(&conn, b"tx_claim").await, Some(1500));
 }

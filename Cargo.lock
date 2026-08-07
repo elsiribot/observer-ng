@@ -2271,6 +2271,7 @@ dependencies = [
  "fedimint-api-client",
  "fedimint-core",
  "fedimint-ln-common",
+ "fedimint-threshold-crypto",
  "fmo_api_types",
  "fmo_core",
  "futures",

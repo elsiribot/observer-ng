@@ -23,4 +23,5 @@ tracing = "0.1.40"
 [dev-dependencies]
 deadpool-postgres = "0.14.0"
 fmo_core = { path = "../../fmo_core", features = ["test-util"] }
+threshold_crypto = { package = "fedimint-threshold-crypto", version = "0.2.1" }
 tokio = { version = "1.37.0", features = ["full"] }

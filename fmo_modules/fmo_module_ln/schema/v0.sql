@@ -21,6 +21,10 @@ CREATE TABLE input_contracts
     FOREIGN KEY (federation_id, txid, in_index)
         REFERENCES public.transaction_inputs (federation_id, txid, in_index)
 );
+-- Resolve "which input(s) spent this contract" without scanning a whole
+-- federation's inputs (the PK starts with txid). Needed for spend/refund
+-- lookups and stranded-contract analysis.
+CREATE INDEX ln_input_contracts_by_contract ON input_contracts (federation_id, contract_id);
 
 -- LN outputs interact with a contract: funding it, creating an offer or
 -- cancelling an outgoing contract
@@ -35,6 +39,8 @@ CREATE TABLE output_contracts
     FOREIGN KEY (federation_id, txid, out_index)
         REFERENCES public.transaction_outputs (federation_id, txid, out_index)
 );
+CREATE INDEX ln_output_contracts_by_contract
+    ON output_contracts (federation_id, contract_id, interaction_kind);
 
 -- Gateway registrations announced to the federation's LN module, polled
 -- periodically (ported from PR #109 by bansalayush247)
@@ -64,3 +70,57 @@ CREATE TABLE gateway_poll_snapshots
 );
 CREATE INDEX gateway_poll_snapshots_fed_time
     ON gateway_poll_snapshots (federation_id, poll_time);
+
+-- Preimage decryption shares from `DecryptPreimage` consensus items. Each
+-- guardian contributes one share per incoming contract; once the federation's
+-- threshold of shares agree, the preimage is decrypted and the contract
+-- becomes spendable (claimed by the recipient on a valid preimage, or refunded
+-- to the gateway on an invalid one). The valid-vs-invalid RESULT is not
+-- recorded here: reproducing it needs the guardians' threshold `PublicKeySet`,
+-- which is absent from the client config the observer downloads. What we can
+-- record is decryption progress and timing.
+CREATE TABLE decryption_shares
+(
+    federation_id BYTEA   NOT NULL REFERENCES public.federations (federation_id),
+    contract_id   BYTEA   NOT NULL,
+    peer_id       INTEGER NOT NULL,
+    session_index INTEGER NOT NULL,
+    item_index    INTEGER NOT NULL,
+    -- one (first) share per guardian per contract
+    PRIMARY KEY (federation_id, contract_id, peer_id)
+);
+CREATE INDEX ln_decryption_shares_contract ON decryption_shares (federation_id, contract_id);
+
+-- Per incoming contract: how many distinct guardians contributed a decryption
+-- share and whether that reached the federation's decryption threshold
+-- (n - (n-1)/3, with n = number of guardians, derived from the distinct peers
+-- that ever submit shares). `decrypted = true` means the preimage was
+-- decrypted and the contract became spendable — independent of whether the
+-- recipient/gateway actually swept it (a stranded-but-decrypted contract is a
+-- recipient/gateway that never claimed; decrypted = false with funds locked is
+-- a decryption that never completed).
+CREATE MATERIALIZED VIEW contract_decryption AS
+WITH guardians AS (
+    SELECT federation_id, COUNT(DISTINCT peer_id) AS num_guardians
+    FROM decryption_shares
+    GROUP BY federation_id
+),
+shares AS (
+    SELECT federation_id, contract_id,
+           COUNT(*)           AS num_shares,
+           MIN(session_index) AS first_share_session,
+           MAX(session_index) AS last_share_session
+    FROM decryption_shares
+    GROUP BY federation_id, contract_id
+)
+SELECT s.federation_id,
+       s.contract_id,
+       s.num_shares,
+       g.num_guardians,
+       (g.num_guardians - (g.num_guardians - 1) / 3)              AS threshold,
+       s.num_shares >= (g.num_guardians - (g.num_guardians - 1) / 3) AS decrypted,
+       s.first_share_session,
+       s.last_share_session
+FROM shares s
+JOIN guardians g USING (federation_id);
+CREATE UNIQUE INDEX contract_decryption_pk ON contract_decryption (federation_id, contract_id);

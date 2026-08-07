@@ -1,8 +1,8 @@
 use chrono::DateTime;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::Amount;
 use fedimint_core::module::CommonModuleInit;
+use fedimint_core::Amount;
 use fedimint_lnv2_common::{
     LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputV0, LightningOutput,
     LightningOutputV0,
