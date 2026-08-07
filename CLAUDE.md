@@ -69,6 +69,7 @@ just test_package fmo_server
   - `fetch.rs` - downloads raw sessions, stores them + structural facts (no module decoding)
   - `ingest.rs` - structural ingest shared by fetcher and import tool
   - `dispatch.rs` - decodes sessions and dispatches items to observer modules; per-module cursors make live processing and historical replay the same code path
+  - `gold.rs` - gold layer: incremental per-federation processor that folds silver (core structural tables + module contract tables) into deduplicated `user_transactions`; cursor (`gold_progress`) trails `min(module cursors)`
   - `module.rs` - the `ObserverModule` trait (decoder, own migrations, process_input/output/ci, background tasks, API router)
   - `import.rs` - one-shot import from a pre-modularization (schema v8) database
   - `services/` - block times, guardian health, nostr sync, meta caches
@@ -80,12 +81,13 @@ just test_package fmo_server
 
 ### Key Patterns
 1. **Shared Types**: All API types are defined in `fmo_api_types` and used by both frontend and backend
-2. **Three-layer data flow** (issue #8): fetch raw sessions → modules normalize into their own schemas → denormalize for the API (Rust-side, in-transaction, plus materialized views)
+2. **Three-layer data flow** (issue #8): fetch raw sessions (bronze) → modules normalize into their own schemas (silver) → cross-module gold layer dedupes into user-facing transactions, denormalized for the API (Rust-side, in-transaction, plus materialized views)
 3. **Per-module cursors**: `module_progress` tracks each module's processing position per federation; adding a module later or bumping its `version()` triggers schema drop + full replay from raw sessions — no refetching
 4. **Idempotent processing**: all inserts use `ON CONFLICT DO NOTHING` so crash-resume and replay are safe
 5. **Graceful unknown data**: unknown module kinds/versions are stored raw/JSON, never panic; a failing module only stalls itself
 6. **Module API routes**: mounted at `/federations/:federation_id/modules/<kind>/…` with compat aliases at historical paths (`/utxos`, `/nonces/spend`, `/gateways`)
 7. **Error Handling**: `AppError` type wrapping `anyhow::Error` in `fmo_core::error`
+8. **Gold layer**: `fmo_core/src/gold.rs` folds silver (core structural tables + module contract tables) into `user_transactions`, a pure function of its inputs; the `gold_progress` cursor trails `min(module cursors)` so it only processes ranges every module has already finished. Dedup key is `contract_id` for LN (folds offer/fund/claim/cancel/refund into one row), `txid` otherwise.
 
 ### Environment Configuration
 Required environment variables (see `sample.env`):
@@ -112,5 +114,6 @@ PostgreSQL; core schema in `public`, one schema per observer module (`fmo_mint`,
 - `module_progress`, `module_versions` - per-module replay cursors and versions
 - `session_time_votes` + `session_times` matview - session timestamps contributed by modules (wallet block votes, lnv2 time votes)
 - `guardian_health`, `nostr_*`, `block_times` - core services
+- Gold layer (cross-module denormalization, see `gold.rs` above): `user_transactions` - one row per deduplicated user transaction (grain: `contract_id` for LN, `txid` otherwise), with exact `fedimint_fee_msat` and, for outgoing LN sends only, an estimated `gateway_fee_estimate_msat`; `user_transaction_txs` - membership/drill-down from a user transaction back to its underlying fedimint tx(s) and their role (offer/fund/claim/cancel/refund/self); `gold_progress` - per-federation replay cursor; `user_tx_daily` matview - rollup by federation/day/kind/direction/status, refreshed on the same cycle as `session_times`
 
 Old (pre-modularization, schema v8) databases are NOT migrated in place; use `fmo_server import --from <old-db-url>` to copy raw data into a fresh database and let module replay rebuild the rest.

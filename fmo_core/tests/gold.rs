@@ -1035,3 +1035,129 @@ async fn fold_ln_leaves_gateway_fee_null_on_schedule_drift() {
         "schedule drift (base > contract) must leave the fee NULL, not a nonsense value"
     );
 }
+
+/// `user_tx_daily` is a materialized view, not auto-refreshed on write: after
+/// folding a couple of standalone transactions it must still be empty until
+/// explicitly refreshed. This guards the periodic refresh loop
+/// (`refresh_views_inner` in `fmo_core::api`) which must include
+/// `"user_tx_daily"` in its matview list alongside `"session_times"` for the
+/// gold rollup to ever become visible in production.
+#[tokio::test]
+async fn user_tx_daily_rolls_up_after_refresh() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+    // Give session 1 a real timestamp via the same path production uses
+    // (module-contributed votes aggregated into `session_times`), so the
+    // resulting `user_transactions` rows have a non-null `first_timestamp`
+    // -- `user_tx_daily` only rolls up rows where that's set.
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+             VALUES ($1, 1, 'wallet', 0, '2024-01-15 12:00:00')",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("REFRESH MATERIALIZED VIEW session_times")
+        .await
+        .unwrap();
+
+    let peg_in_1 = vec![10u8; 32];
+    let peg_in_2 = vec![11u8; 32];
+    let peg_out = vec![12u8; 32];
+    insert_tx(&pool, &fed, &peg_in_1, 1, "wallet", 100_000, "mint", 99_000).await;
+    insert_tx(&pool, &fed, &peg_in_2, 1, "wallet", 200_000, "mint", 198_000).await;
+    insert_tx(&pool, &fed, &peg_out, 1, "mint", 50_000, "wallet", 49_000).await;
+
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+
+    // Sanity: the fold produced the rows we expect, with a real timestamp.
+    let user_tx_count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM user_transactions WHERE federation_id = $1 AND first_timestamp IS NOT NULL",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(user_tx_count, 3);
+
+    // Red: the matview is not auto-refreshed, so it must still be empty.
+    let daily_count_before: i64 = conn
+        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        daily_count_before, 0,
+        "user_tx_daily must not auto-populate without an explicit refresh"
+    );
+
+    conn.batch_execute("REFRESH MATERIALIZED VIEW user_tx_daily")
+        .await
+        .unwrap();
+
+    // Green: after refresh, peg_in rows (same kind/direction/status) roll up
+    // together and peg_out stays a separate group.
+    let peg_in_row = conn
+        .query_one(
+            "SELECT tx_count, volume_msat::bigint, fedimint_fee_msat::bigint
+             FROM user_tx_daily
+             WHERE federation_id = $1 AND day = '2024-01-15' AND kind = 'peg_in'
+               AND direction = 'in' AND status = 'completed'",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+    assert_eq!(peg_in_row.get::<_, i64>("tx_count"), 2);
+    assert_eq!(peg_in_row.get::<_, i64>("volume_msat"), 300_000);
+    assert_eq!(peg_in_row.get::<_, i64>("fedimint_fee_msat"), 3_000);
+
+    let peg_out_row = conn
+        .query_one(
+            "SELECT tx_count, volume_msat::bigint, fedimint_fee_msat::bigint
+             FROM user_tx_daily
+             WHERE federation_id = $1 AND day = '2024-01-15' AND kind = 'peg_out'
+               AND direction = 'out' AND status = 'completed'",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+    assert_eq!(peg_out_row.get::<_, i64>("tx_count"), 1);
+    assert_eq!(peg_out_row.get::<_, i64>("volume_msat"), 49_000);
+    assert_eq!(peg_out_row.get::<_, i64>("fedimint_fee_msat"), 1_000);
+}

@@ -21,6 +21,16 @@ module kind interprets that module's data.
     Every module has its own processing cursor per federation (`module_progress`), advanced atomically with
     the module's writes — a module added (or version-bumped) later simply replays the whole history from
     the raw sessions, no re-fetching needed.
+  * *Gold layer* (`gold.rs`): a cross-module denormalization tier that dedupes raw fedimint transactions
+    into user-facing ones. It's a pure function of the silver data (core structural tables plus each
+    module's own contract tables), built by an incremental per-federation processor whose `gold_progress`
+    cursor trails `min(module cursors)` so it never reads ahead of data a module hasn't finished
+    processing yet. The dedup key is `contract_id` for Lightning — folding every leg of a contract's
+    lifecycle (offer/fund/claim/cancel/refund) into one row — and `txid` otherwise. Four objects:
+    `user_transactions` (one row per user transaction, with the exact `fedimint_fee_msat` and, for
+    outgoing LN sends only, an estimated `gateway_fee_estimate_msat`), `user_transaction_txs`
+    (membership/drill-down back to the underlying fedimint txs and their role), `gold_progress` (the
+    replay cursor), and the `user_tx_daily` materialized rollup by federation/day/kind/direction/status.
   * *Core services*: block time sync, guardian health monitoring, nostr federation/vote sync, meta
     fetching, and the HTTP API framework.
 * **`fmo_modules/fmo_module_{mint,mintv2,wallet,walletv2,ln,lnv2}`** — one crate per fedimint module kind. Each implements

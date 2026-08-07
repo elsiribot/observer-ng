@@ -137,7 +137,7 @@ impl FederationObserver {
     }
 
     async fn refresh_views_inner(&self) -> anyhow::Result<()> {
-        let mut matviews = vec!["session_times".to_owned()];
+        let mut matviews = vec!["session_times".to_owned(), "user_tx_daily".to_owned()];
         for (_, module) in self.registry().iter() {
             matviews.extend(module.matviews().iter().map(|view| (*view).to_owned()));
         }
