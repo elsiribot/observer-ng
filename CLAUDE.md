@@ -81,7 +81,7 @@ just test_package fmo_server
 
 ### Key Patterns
 1. **Shared Types**: All API types are defined in `fmo_api_types` and used by both frontend and backend
-2. **Three-layer data flow** (issue #8): fetch raw sessions (bronze) → modules normalize into their own schemas (silver) → cross-module gold layer dedupes into user-facing transactions, denormalized for the API (Rust-side, in-transaction, plus materialized views)
+2. **Three-layer data flow** (issue #8): fetch raw sessions (bronze) → modules normalize into their own schemas (silver, Rust-side and in-transaction) → cross-module gold layer dedupes into directly-queryable user-transaction tables (not yet exposed via an API route)
 3. **Per-module cursors**: `module_progress` tracks each module's processing position per federation; adding a module later or bumping its `version()` triggers schema drop + full replay from raw sessions — no refetching
 4. **Idempotent processing**: all inserts use `ON CONFLICT DO NOTHING` so crash-resume and replay are safe
 5. **Graceful unknown data**: unknown module kinds/versions are stored raw/JSON, never panic; a failing module only stalls itself
