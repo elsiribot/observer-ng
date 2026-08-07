@@ -965,3 +965,73 @@ async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
         .get(0);
     assert_eq!(fee_again, Some(fee), "idempotent: value unchanged");
 }
+
+/// Fee-schedule drift: a gateway's CURRENT advertised `base_msat` (5000) is
+/// larger than an old contract's gross amount (3000). Naively inverting the
+/// fee would give `invoice = (3000-5000)/(1+ppm) < 0` and an estimated "fee"
+/// of ~4990 msat — larger than the whole contract, a nonsense
+/// fee-transparency number. The estimator must leave `gateway_fee_estimate_msat`
+/// NULL (unknown), never a negative or >contract value, and must not error.
+#[tokio::test]
+async fn fold_ln_leaves_gateway_fee_null_on_schedule_drift() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    create_ln_schemas(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+
+    let gateway_key = "03ffeeddccbbaa00998877665544332211ffeeddccbbaa009988776655443322";
+    // base_msat (5000) > the contract amount (3000): schedule drift
+    insert_ln_gateway(&pool, &fed, "gw1", gateway_key, 5000, 5000).await;
+
+    let send_contract_id = vec![0xC5u8; 32];
+    let send_fund_txid = vec![0xC6u8; 32];
+    insert_ln_contract(&pool, &fed, &send_contract_id, "outgoing").await;
+    insert_bare_tx(&pool, &fed, &send_fund_txid, 1).await;
+    insert_tx_input(&pool, &fed, &send_fund_txid, 0, "mint", 3_000).await;
+    insert_ln_fund_output_with_gateway_key(&pool, &fed, &send_fund_txid, 0, 3_000, gateway_key)
+        .await;
+    insert_ln_output_contract(&pool, &fed, &send_fund_txid, 0, "fund", &send_contract_id).await;
+
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .expect("fold_sessions must not error on schedule drift");
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+    let fee: Option<i64> = conn
+        .query_one(
+            "SELECT gateway_fee_estimate_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &send_contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        fee, None,
+        "schedule drift (base > contract) must leave the fee NULL, not a nonsense value"
+    );
+}

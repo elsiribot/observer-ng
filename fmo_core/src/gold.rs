@@ -361,6 +361,21 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
 /// Guarded on `fmo_ln.gateways` existing so instances without the LN module
 /// (or without any gateway ever polled) skip cleanly.
 ///
+/// **Fee-schedule drift:** the join uses the gateway's *current* advertised
+/// fee, but a contract was funded against whatever schedule was live then. If
+/// the gateway later raised `base_msat` above an old contract's amount, the
+/// inversion yields `invoice <= 0` and a "fee" >= the contract amount — a
+/// nonsense fee-transparency number. Such rows are left NULL (unknown is the
+/// correct answer, not a clamped/negative value): the outer `WHERE fee > 0
+/// AND fee < contract` drops them.
+///
+/// **Deterministic gateway pick:** one physical gateway can register several
+/// `fmo_ln.gateways` rows sharing a `gateway_redeem_key` (e.g. separate
+/// HTTP/Iroh entries) that may advertise different fees. To keep the estimate
+/// stable across re-runs (idempotency), we collapse to one fee schedule per
+/// `(federation_id, redeem_key)` with `DISTINCT ON ... ORDER BY gateway_id`,
+/// i.e. deterministically the lowest `gateway_id`.
+///
 /// No LNv2 analogue: lnv2 outgoing contracts (`fmo_lnv2.contracts`) don't
 /// carry a gateway key in their structural facts, and there is no
 /// `fmo_lnv2.gateways` table or any other fee-schedule source in this
@@ -375,17 +390,37 @@ async fn estimate_ln_gateway_fees(
         return Ok(());
     }
     dbtx.execute(
-        "UPDATE user_transactions ut SET gateway_fee_estimate_msat =
-            ut.amount_msat - ROUND((ut.amount_msat - g.base) / (1 + g.ppm / 1000000.0))
-         FROM (SELECT oc.federation_id, oc.contract_id,
-                      (gw.raw #>> '{info,fees,base_msat}')::numeric base,
-                      (gw.raw #>> '{info,fees,proportional_millionths}')::numeric ppm
-               FROM fmo_ln.output_contracts oc
-               JOIN transaction_outputs o USING (federation_id, txid, out_index)
-               JOIN fmo_ln.gateways gw ON gw.federation_id = oc.federation_id
-                    AND gw.raw #>> '{info,gateway_redeem_key}' =
-                        (o.details #>> '{V0,Contract,contract,Outgoing,gateway_key}')
-               WHERE oc.interaction_kind = 'fund') g
+        "UPDATE user_transactions ut SET gateway_fee_estimate_msat = g.fee
+         FROM (
+             SELECT e.federation_id, e.contract_id, e.fee
+             FROM (
+                 SELECT oc.federation_id, oc.contract_id,
+                        o.amount_msat AS contract,
+                        o.amount_msat
+                          - ROUND((o.amount_msat - gw.base) / (1 + gw.ppm / 1000000.0)) AS fee
+                 FROM fmo_ln.output_contracts oc
+                 JOIN transaction_outputs o USING (federation_id, txid, out_index)
+                 JOIN (
+                     -- one deterministic fee schedule per (federation_id, redeem_key)
+                     SELECT DISTINCT ON (federation_id, redeem_key)
+                            federation_id, redeem_key, base, ppm
+                     FROM (
+                         SELECT federation_id, gateway_id,
+                                raw #>> '{info,gateway_redeem_key}' AS redeem_key,
+                                (raw #>> '{info,fees,base_msat}')::numeric AS base,
+                                (raw #>> '{info,fees,proportional_millionths}')::numeric AS ppm
+                         FROM fmo_ln.gateways
+                     ) gws
+                     WHERE redeem_key IS NOT NULL AND base IS NOT NULL AND ppm IS NOT NULL
+                     ORDER BY federation_id, redeem_key, gateway_id
+                 ) gw ON gw.federation_id = oc.federation_id
+                      AND gw.redeem_key =
+                          (o.details #>> '{V0,Contract,contract,Outgoing,gateway_key}')
+                 WHERE oc.interaction_kind = 'fund'
+             ) e
+             -- drop nonsense estimates from fee-schedule drift; NULL is correct
+             WHERE e.fee > 0 AND e.fee < e.contract
+         ) g
          WHERE ut.federation_id = g.federation_id AND ut.user_tx_key = g.contract_id
            AND ut.kind = 'ln_send'
            AND ut.federation_id = $1 AND ut.first_session_index >= $2 AND ut.first_session_index < $3",
