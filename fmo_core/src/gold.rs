@@ -2,14 +2,21 @@
 //! `transaction_inputs` / `transaction_outputs` tables into deduplicated
 //! user-transaction tables (`user_transactions`, `user_transaction_txs`).
 //!
-//! This module currently implements only the standalone (non-LN)
-//! classification: peg-in / peg-out / ecash transfer / stability pool (v1 and
-//! v2 analogues), by input/output kind signature, with the exact fedimint fee
-//! `Σinputs − Σoutputs`. Transactions that touch an LN or LNv2 contract are
-//! skipped here; grouping them into multi-tx user transactions (offer → fund
-//! → claim/refund) is a later task. `fold_sessions` is the single entry point
-//! both the background processor and tests call; it will grow an `fold_ln`
-//! call alongside `fold_standalone` once LN grouping lands.
+//! Two classifiers feed `fold_sessions`, the single entry point both the
+//! background processor and tests call:
+//! - `fold_standalone`: peg-in / peg-out / ecash transfer / stability pool
+//!   (v1 and v2 analogues), by input/output kind signature, with the exact
+//!   fedimint fee `Σinputs − Σoutputs`. One row per non-LN-leg txid.
+//! - `fold_ln`: LN/LNv2 payments, folding every leg of a contract's lifecycle
+//!   (offer/fund/claim/cancel/refund, possibly spanning many sessions) into
+//!   one `user_transactions` row keyed by `contract_id`, with a
+//!   `user_transaction_txs` membership row per leg.
+//!
+//! Both a federation's LN module and its LNv2 module are optional (a given
+//! `FederationObserver` instance may not install either), so both
+//! `fold_standalone`'s LN-leg guards and `fold_ln`'s LN/LNv2 blocks check
+//! `to_regclass` before touching `fmo_ln`/`fmo_lnv2` and skip gracefully if
+//! the schema is absent.
 
 use std::time::Duration;
 
@@ -19,21 +26,50 @@ use fedimint_core::encoding::Encodable;
 
 use crate::observer::FederationObserver;
 
+/// True if `schema.table` exists — used to gracefully skip `fmo_ln` /
+/// `fmo_lnv2` handling for federations/instances that don't have that module
+/// installed, instead of erroring on a missing relation.
+async fn table_exists(dbtx: &Transaction<'_>, qualified_name: &str) -> anyhow::Result<bool> {
+    Ok(dbtx
+        .query_one(
+            "SELECT to_regclass($1) IS NOT NULL",
+            &[&qualified_name],
+        )
+        .await?
+        .get(0))
+}
+
 /// Classifies standalone (non-LN) transactions in session range `[start,
 /// end)` by their input/output kind signature and upserts them into
 /// `user_transactions`, plus a `self` membership row per txid in
 /// `user_transaction_txs`. Idempotent: safe to re-run over the same range.
 ///
 /// LN-leg transactions (inputs/outputs that reference an `fmo_ln` /
-/// `fmo_lnv2` contract) are skipped; they are folded by `fold_ln` (added in a
-/// later task).
+/// `fmo_lnv2` contract) are skipped; they are folded by `fold_ln` instead.
+/// The guards against each are only included when that module's schema
+/// exists (see `table_exists`) — a federation/instance without the LN or
+/// LNv2 module installed has no `fmo_ln`/`fmo_lnv2` schema at all.
 pub async fn fold_standalone(
     dbtx: &Transaction<'_>,
     fed: &[u8],
     start: i32,
     end: i32,
 ) -> anyhow::Result<()> {
-    dbtx.execute(
+    let mut ln_guards = String::new();
+    if table_exists(dbtx, "fmo_ln.contracts").await? {
+        ln_guards.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM fmo_ln.output_contracts oc WHERE oc.federation_id=t.federation_id AND oc.txid=t.txid)
+              AND NOT EXISTS (SELECT 1 FROM fmo_ln.input_contracts  ic WHERE ic.federation_id=t.federation_id AND ic.txid=t.txid)",
+        );
+    }
+    if table_exists(dbtx, "fmo_lnv2.contracts").await? {
+        ln_guards.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM fmo_lnv2.contracts        c2 WHERE c2.federation_id=t.federation_id AND c2.txid=t.txid)
+              AND NOT EXISTS (SELECT 1 FROM fmo_lnv2.input_outpoints  io WHERE io.federation_id=t.federation_id AND io.txid=t.txid)",
+        );
+    }
+
+    let query = format!(
         "INSERT INTO user_transactions
            (federation_id, user_tx_key, kind, direction, amount_msat,
             fedimint_fee_msat, num_fedimint_txs, first_session_index,
@@ -71,17 +107,13 @@ pub async fn fold_standalone(
                        FROM transaction_outputs WHERE federation_id=t.federation_id AND txid=t.txid) o ON true
          LEFT JOIN session_times st ON st.federation_id=t.federation_id AND st.session_index=t.session_index
          WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3
-           AND NOT EXISTS (SELECT 1 FROM fmo_ln.output_contracts oc WHERE oc.federation_id=t.federation_id AND oc.txid=t.txid)
-           AND NOT EXISTS (SELECT 1 FROM fmo_ln.input_contracts  ic WHERE ic.federation_id=t.federation_id AND ic.txid=t.txid)
-           AND NOT EXISTS (SELECT 1 FROM fmo_lnv2.contracts        c2 WHERE c2.federation_id=t.federation_id AND c2.txid=t.txid)
-           AND NOT EXISTS (SELECT 1 FROM fmo_lnv2.input_outpoints  io WHERE io.federation_id=t.federation_id AND io.txid=t.txid)
+           {ln_guards}
          ON CONFLICT (federation_id, user_tx_key) DO UPDATE SET
             kind=EXCLUDED.kind, direction=EXCLUDED.direction, amount_msat=EXCLUDED.amount_msat,
             fedimint_fee_msat=EXCLUDED.fedimint_fee_msat, first_timestamp=EXCLUDED.first_timestamp,
-            last_timestamp=EXCLUDED.last_timestamp",
-        &[&fed, &start, &end],
-    )
-    .await?;
+            last_timestamp=EXCLUDED.last_timestamp"
+    );
+    dbtx.execute(&query, &[&fed, &start, &end]).await?;
 
     // self membership rows
     dbtx.execute(
@@ -97,16 +129,199 @@ pub async fn fold_standalone(
     Ok(())
 }
 
-/// Folds session range `[start, end)` into the gold layer. For now this is
-/// just standalone classification; a later task adds a `fold_ln` call
-/// alongside it for LN/LNv2 contract-based grouping.
+/// `(federation_id, contract_id)` pairs for lnv1 contracts touched by a leg
+/// (`fmo_ln.output_contracts` or `fmo_ln.input_contracts` row) whose tx falls
+/// in session range `[$2,$3)` for federation `$1`. Shared by the main
+/// recompute query and the membership-row query below so both agree on
+/// exactly which contracts are in scope for this fold.
+const LN_TOUCHED_CONTRACTS: &str = "(SELECT oc.federation_id, oc.contract_id
+       FROM fmo_ln.output_contracts oc JOIN transactions t USING (federation_id, txid)
+       WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3
+     UNION
+     SELECT ic.federation_id, ic.contract_id
+       FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)
+       WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3)";
+
+/// Same as `LN_TOUCHED_CONTRACTS` but for lnv2: a leg is a `fmo_lnv2.contracts`
+/// row (the funding tx) or a `fmo_lnv2.input_outpoints` row that spends a
+/// contract's funding outpoint (claim).
+const LNV2_TOUCHED_CONTRACTS: &str = "(SELECT c.federation_id, c.contract_id
+       FROM fmo_lnv2.contracts c JOIN transactions t USING (federation_id, txid)
+       WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3
+     UNION
+     SELECT c2.federation_id, c2.contract_id
+       FROM fmo_lnv2.input_outpoints io
+       JOIN fmo_lnv2.contracts c2 ON c2.federation_id=io.federation_id
+         AND c2.txid=io.outpoint_txid AND c2.out_index=io.outpoint_out_index
+       JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid
+       WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3)";
+
+/// Folds LN (lnv1) and LNv2 contracts touched by a tx in session range
+/// `[start, end)` into `user_transactions` (keyed by `contract_id`) plus
+/// `user_transaction_txs` membership rows (one per leg, with its role).
+/// Recomputes every touched contract from scratch each time — idempotent and
+/// independent of leg order, so replay and out-of-order processing are safe.
+/// Skips the lnv1/lnv2 blocks entirely (via `table_exists`) when that
+/// module's schema isn't installed for this observer instance.
+pub async fn fold_ln(
+    dbtx: &Transaction<'_>,
+    fed: &[u8],
+    start: i32,
+    end: i32,
+) -> anyhow::Result<()> {
+    if table_exists(dbtx, "fmo_ln.contracts").await? {
+        fold_ln_v1(dbtx, fed, start, end).await?;
+    }
+    if table_exists(dbtx, "fmo_lnv2.contracts").await? {
+        fold_lnv2(dbtx, fed, start, end).await?;
+    }
+    Ok(())
+}
+
+async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> anyhow::Result<()> {
+    let query = format!(
+        "INSERT INTO user_transactions (federation_id, user_tx_key, kind, direction, amount_msat,
+            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp, status)
+         SELECT c.federation_id, c.contract_id,
+                CASE WHEN c.type='incoming' THEN 'ln_receive' ELSE 'ln_send' END,
+                CASE WHEN c.type='incoming' THEN 'in' ELSE 'out' END,
+                funds.amount_msat,
+                fees.fee_msat,
+                legs.n,
+                legs.first_session,
+                fst.estimated_session_timestamp, lst.estimated_session_timestamp,
+                CASE WHEN spends.\"any\" THEN 'completed'
+                     WHEN cancels.\"any\" THEN 'cancelled'
+                     ELSE 'in_flight' END
+         FROM fmo_ln.contracts c
+         JOIN (SELECT federation_id, contract_id, SUM(o.amount_msat) amount_msat
+               FROM fmo_ln.output_contracts oc JOIN transaction_outputs o USING (federation_id, txid, out_index)
+               WHERE oc.interaction_kind='fund' GROUP BY 1,2) funds USING (federation_id, contract_id)
+         JOIN (SELECT federation_id, contract_id, COUNT(DISTINCT txid) n,
+                      MIN(session_index) first_session, MAX(session_index) last_session
+               FROM (SELECT oc.federation_id, oc.contract_id, oc.txid, t.session_index
+                       FROM fmo_ln.output_contracts oc JOIN transactions t USING (federation_id, txid)
+                     UNION
+                     SELECT ic.federation_id, ic.contract_id, ic.txid, t.session_index
+                       FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)) all_legs
+               GROUP BY 1,2) legs USING (federation_id, contract_id)
+         JOIN LATERAL (SELECT COALESCE(SUM(f.fee),0) fee_msat FROM (
+                 SELECT (SELECT SUM(amount_msat) FROM transaction_inputs  WHERE federation_id=x.federation_id AND txid=x.txid)
+                      - (SELECT SUM(amount_msat) FROM transaction_outputs WHERE federation_id=x.federation_id AND txid=x.txid) fee
+                 FROM (SELECT DISTINCT federation_id, txid FROM (
+                        SELECT federation_id, txid FROM fmo_ln.output_contracts WHERE federation_id=c.federation_id AND contract_id=c.contract_id
+                        UNION SELECT federation_id, txid FROM fmo_ln.input_contracts WHERE federation_id=c.federation_id AND contract_id=c.contract_id) u) x) f) fees ON true
+         JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_ln.input_contracts
+                       WHERE federation_id=c.federation_id AND contract_id=c.contract_id) spends ON true
+         LEFT JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_ln.output_contracts
+                       WHERE federation_id=c.federation_id AND contract_id=c.contract_id AND interaction_kind='cancel') cancels ON true
+         LEFT JOIN session_times fst ON fst.federation_id=c.federation_id AND fst.session_index=legs.first_session
+         LEFT JOIN session_times lst ON lst.federation_id=c.federation_id AND lst.session_index=legs.last_session
+         WHERE (c.federation_id, c.contract_id) IN {LN_TOUCHED_CONTRACTS}
+         ON CONFLICT (federation_id, user_tx_key) DO UPDATE SET
+            kind=EXCLUDED.kind, direction=EXCLUDED.direction, amount_msat=EXCLUDED.amount_msat,
+            fedimint_fee_msat=EXCLUDED.fedimint_fee_msat, num_fedimint_txs=EXCLUDED.num_fedimint_txs,
+            first_session_index=EXCLUDED.first_session_index, first_timestamp=EXCLUDED.first_timestamp,
+            last_timestamp=EXCLUDED.last_timestamp, status=EXCLUDED.status"
+    );
+    dbtx.execute(&query, &[&fed, &start, &end]).await?;
+
+    let query = format!(
+        "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
+         SELECT oc.federation_id, oc.txid, oc.contract_id, oc.interaction_kind, t.session_index
+           FROM fmo_ln.output_contracts oc JOIN transactions t USING (federation_id, txid)
+           WHERE (oc.federation_id, oc.contract_id) IN {LN_TOUCHED_CONTRACTS}
+         UNION ALL
+         SELECT ic.federation_id, ic.txid, ic.contract_id,
+                CASE WHEN EXISTS (SELECT 1 FROM fmo_ln.output_contracts x
+                                   WHERE x.federation_id=ic.federation_id AND x.contract_id=ic.contract_id AND x.interaction_kind='cancel')
+                     THEN 'refund' ELSE 'claim' END,
+                t.session_index
+           FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)
+           WHERE (ic.federation_id, ic.contract_id) IN {LN_TOUCHED_CONTRACTS}
+         ON CONFLICT DO NOTHING"
+    );
+    dbtx.execute(&query, &[&fed, &start, &end]).await?;
+
+    Ok(())
+}
+
+async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> anyhow::Result<()> {
+    let query = format!(
+        "INSERT INTO user_transactions (federation_id, user_tx_key, kind, direction, amount_msat,
+            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp, status)
+         SELECT c.federation_id, c.contract_id,
+                CASE WHEN c.type='incoming' THEN 'lnv2_receive' ELSE 'lnv2_send' END,
+                CASE WHEN c.type='incoming' THEN 'in' ELSE 'out' END,
+                c.amount_msat,
+                fees.fee_msat,
+                legs.n,
+                legs.first_session,
+                fst.estimated_session_timestamp, lst.estimated_session_timestamp,
+                CASE WHEN spends.\"any\" THEN 'completed' ELSE 'in_flight' END
+         FROM fmo_lnv2.contracts c
+         JOIN (SELECT federation_id, contract_id, COUNT(DISTINCT txid) n,
+                      MIN(session_index) first_session, MAX(session_index) last_session
+               FROM (SELECT c2.federation_id, c2.contract_id, c2.txid, t.session_index
+                       FROM fmo_lnv2.contracts c2 JOIN transactions t USING (federation_id, txid)
+                     UNION
+                     SELECT c2.federation_id, c2.contract_id, io.txid, t.session_index
+                       FROM fmo_lnv2.input_outpoints io
+                       JOIN fmo_lnv2.contracts c2 ON c2.federation_id=io.federation_id
+                         AND c2.txid=io.outpoint_txid AND c2.out_index=io.outpoint_out_index
+                       JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid) all_legs
+               GROUP BY 1,2) legs USING (federation_id, contract_id)
+         JOIN LATERAL (SELECT COALESCE(SUM(f.fee),0) fee_msat FROM (
+                 SELECT (SELECT SUM(amount_msat) FROM transaction_inputs  WHERE federation_id=x.federation_id AND txid=x.txid)
+                      - (SELECT SUM(amount_msat) FROM transaction_outputs WHERE federation_id=x.federation_id AND txid=x.txid) fee
+                 FROM (SELECT DISTINCT federation_id, txid FROM (
+                        SELECT c.federation_id AS federation_id, c.txid AS txid
+                        UNION
+                        SELECT io.federation_id, io.txid FROM fmo_lnv2.input_outpoints io
+                          WHERE io.federation_id=c.federation_id AND io.outpoint_txid=c.txid AND io.outpoint_out_index=c.out_index) u) x) f) fees ON true
+         JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_lnv2.input_outpoints io
+                       WHERE io.federation_id=c.federation_id AND io.outpoint_txid=c.txid AND io.outpoint_out_index=c.out_index) spends ON true
+         LEFT JOIN session_times fst ON fst.federation_id=c.federation_id AND fst.session_index=legs.first_session
+         LEFT JOIN session_times lst ON lst.federation_id=c.federation_id AND lst.session_index=legs.last_session
+         WHERE (c.federation_id, c.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
+         ON CONFLICT (federation_id, user_tx_key) DO UPDATE SET
+            kind=EXCLUDED.kind, direction=EXCLUDED.direction, amount_msat=EXCLUDED.amount_msat,
+            fedimint_fee_msat=EXCLUDED.fedimint_fee_msat, num_fedimint_txs=EXCLUDED.num_fedimint_txs,
+            first_session_index=EXCLUDED.first_session_index, first_timestamp=EXCLUDED.first_timestamp,
+            last_timestamp=EXCLUDED.last_timestamp, status=EXCLUDED.status"
+    );
+    dbtx.execute(&query, &[&fed, &start, &end]).await?;
+
+    let query = format!(
+        "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
+         SELECT c.federation_id, c.txid, c.contract_id, 'fund', t.session_index
+           FROM fmo_lnv2.contracts c JOIN transactions t USING (federation_id, txid)
+           WHERE (c.federation_id, c.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
+         UNION ALL
+         SELECT io.federation_id, io.txid, c2.contract_id, 'claim', t.session_index
+           FROM fmo_lnv2.input_outpoints io
+           JOIN fmo_lnv2.contracts c2 ON c2.federation_id=io.federation_id
+             AND c2.txid=io.outpoint_txid AND c2.out_index=io.outpoint_out_index
+           JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid
+           WHERE (c2.federation_id, c2.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
+         ON CONFLICT DO NOTHING"
+    );
+    dbtx.execute(&query, &[&fed, &start, &end]).await?;
+
+    Ok(())
+}
+
+/// Folds session range `[start, end)` into the gold layer: standalone
+/// (non-LN) classification plus LN/LNv2 contract grouping.
 pub async fn fold_sessions(
     dbtx: &Transaction<'_>,
     fed: &[u8],
     start: i32,
     end: i32,
 ) -> anyhow::Result<()> {
-    fold_standalone(dbtx, fed, start, end).await
+    fold_standalone(dbtx, fed, start, end).await?;
+    fold_ln(dbtx, fed, start, end).await?;
+    Ok(())
 }
 
 /// Background task: incrementally folds one federation's structural
