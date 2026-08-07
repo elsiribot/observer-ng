@@ -9,7 +9,7 @@ use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::task::TaskGroup;
 use tokio_postgres::NoTls;
-use tracing::{error, info_span, Instrument};
+use tracing::{error, info_span, warn, Instrument};
 
 use crate::db::migrations::{setup_core_schema, setup_module_schema};
 use crate::federation::Federation;
@@ -242,6 +242,19 @@ impl FederationObserver {
                     }
                 }
                 .instrument(info_span!("health", fed = %federation_id.to_prefix())),
+            );
+        }
+
+        {
+            let observer = self.clone();
+            self.task_group.spawn_cancellable(
+                format!("gold {federation_id}"),
+                async move {
+                    if let Err(e) = crate::gold::run_gold_processor(observer, federation_id).await {
+                        warn!("gold processor: {e:?}");
+                    }
+                }
+                .instrument(info_span!("gold", fed = %federation_id.to_prefix())),
             );
         }
 

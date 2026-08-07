@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod error;
 pub mod federation;
 pub mod fetch;
+pub mod gold;
 pub mod import;
 pub mod ingest;
 pub mod module;
