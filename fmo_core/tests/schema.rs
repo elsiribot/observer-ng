@@ -36,7 +36,14 @@ async fn core_schema_applies_and_is_idempotent() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(v, 0);
+    assert_eq!(v, 1);
+    // gold tables exist
+    conn.execute(
+        "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+        &[&&[1u8; 32][..]],
+    )
+    .await
+    .expect_err("FK: federation must exist -> proves table+FK present");
 }
 
 #[tokio::test]

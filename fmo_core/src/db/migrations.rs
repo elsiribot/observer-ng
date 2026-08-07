@@ -15,9 +15,14 @@ pub fn schema_name(kind: &str) -> String {
     )
 }
 
-const CORE_MIGRATIONS: &[Migration] = &[Migration {
-    sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/core/v0.sql")),
-}];
+const CORE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/core/v0.sql")),
+    },
+    Migration {
+        sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/core/v1.sql")),
+    },
+];
 
 /// Applies pending core schema migrations, tracked in `core_schema_version`.
 pub async fn setup_core_schema(pool: &Pool) -> anyhow::Result<()> {
