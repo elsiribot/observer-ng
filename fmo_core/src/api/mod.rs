@@ -137,11 +137,6 @@ impl FederationObserver {
     }
 
     async fn refresh_views_inner(&self) -> anyhow::Result<()> {
-        let mut matviews = vec!["session_times".to_owned(), "user_tx_daily".to_owned()];
-        for (_, module) in self.registry().iter() {
-            matviews.extend(module.matviews().iter().map(|view| (*view).to_owned()));
-        }
-
         let conn = self.connection().await?;
 
         // Before refreshing the aggregates, fill in amounts that only balance
@@ -152,6 +147,23 @@ impl FederationObserver {
             debug!("Inferred amounts for {inferred_inputs} inputs and {inferred_outputs} outputs");
         }
 
+        // `session_times` (the source of `first_timestamp`) must be refreshed
+        // BEFORE the gold self-heal reads it, and the gold layer's
+        // `user_tx_daily` rollup must be refreshed AFTER the heal fills in the
+        // timestamps/amounts the async enrichment above produced. So the order
+        // is fixed: session_times -> heal_gold -> user_tx_daily (+ module
+        // matviews).
+        conn.batch_execute("REFRESH MATERIALIZED VIEW CONCURRENTLY session_times")
+            .await?;
+
+        // Repair gold rows the processor folded before their timestamp /
+        // inferred amount existed (see gold::heal_gold).
+        crate::gold::heal_gold(&conn).await?;
+
+        let mut matviews = vec!["user_tx_daily".to_owned()];
+        for (_, module) in self.registry().iter() {
+            matviews.extend(module.matviews().iter().map(|view| (*view).to_owned()));
+        }
         for matview in matviews {
             conn.batch_execute(&format!("REFRESH MATERIALIZED VIEW CONCURRENTLY {matview}"))
                 .await?;

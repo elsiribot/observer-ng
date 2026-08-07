@@ -494,6 +494,290 @@ async fn fold_standalone_classifies_peg_in_peg_out_and_ecash() {
     );
 }
 
+/// walletv2 pegs mirror v1 wallet: a walletv2 INPUT is a deposit/peg-in (money
+/// entering the federation, classified `peg_in_v2`/`in` with the amount from
+/// the walletv2 input side), a walletv2 OUTPUT is a withdrawal/peg-out
+/// (`peg_out_v2`/`out`, amount from the walletv2 output side). Regression guard
+/// for the previously-inverted v2 arms.
+#[tokio::test]
+async fn fold_standalone_classifies_walletv2_pegs() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    create_ln_schemas(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+
+    // peg-in v2: walletv2 INPUT funds a mintv2 output, in=100k out=99k -> fee 1000
+    let peg_in_txid = vec![0x21u8; 32];
+    insert_tx(&pool, &fed, &peg_in_txid, 1, "walletv2", 100_000, "mintv2", 99_000).await;
+    // peg-out v2: mintv2 input redeemed for a walletv2 OUTPUT, in=50k out=49k -> fee 1000
+    let peg_out_txid = vec![0x22u8; 32];
+    insert_tx(&pool, &fed, &peg_out_txid, 1, "mintv2", 50_000, "walletv2", 49_000).await;
+
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+
+    let row = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat, fedimint_fee_msat
+             FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("kind"), "peg_in_v2");
+    assert_eq!(row.get::<_, String>("direction"), "in");
+    assert_eq!(row.get::<_, i64>("amount_msat"), 100_000);
+    assert_eq!(row.get::<_, i64>("fedimint_fee_msat"), 1_000);
+
+    let row = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat, fedimint_fee_msat
+             FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_out_txid],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("kind"), "peg_out_v2");
+    assert_eq!(row.get::<_, String>("direction"), "out");
+    assert_eq!(row.get::<_, i64>("amount_msat"), 49_000);
+    assert_eq!(row.get::<_, i64>("fedimint_fee_msat"), 1_000);
+}
+
+/// I2 regression: gold routinely folds a session BEFORE `session_times` covers
+/// it (session_times is an async matview refreshed in `refresh_views_inner`),
+/// so `first_timestamp` is NULL and the row is dropped from `user_tx_daily`
+/// (`WHERE first_timestamp IS NOT NULL`). The refresh-cycle self-heal
+/// (`heal_gold`, run after session_times refresh, before user_tx_daily refresh)
+/// must backfill the timestamp so the row appears in the rollup.
+#[tokio::test]
+async fn heal_gold_backfills_timestamp_and_populates_daily() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+    let peg_in_txid = vec![0x31u8; 32];
+    insert_tx(&pool, &fed, &peg_in_txid, 1, "wallet", 100_000, "mint", 99_000).await;
+
+    // Fold BEFORE any session_time vote exists.
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+    let ts_before: Option<std::time::SystemTime> = conn
+        .query_one(
+            "SELECT first_timestamp FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(ts_before.is_none(), "first_timestamp must be NULL before the vote exists");
+
+    conn.batch_execute("REFRESH MATERIALIZED VIEW user_tx_daily")
+        .await
+        .unwrap();
+    let daily_before: i64 = conn
+        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(daily_before, 0, "timestamp-less row must be absent from user_tx_daily");
+    drop(conn);
+
+    // Simulate a refresh cycle: vote arrives, session_times refreshes, heal runs.
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+         VALUES ($1, 1, 'wallet', 0, '2024-01-15 12:00:00')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+        .await
+        .unwrap();
+    fmo_core::gold::heal_gold(&conn).await.unwrap();
+
+    let ts_after: Option<std::time::SystemTime> = conn
+        .query_one(
+            "SELECT first_timestamp FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(ts_after.is_some(), "heal must backfill first_timestamp from session_times");
+
+    conn.batch_execute("REFRESH MATERIALIZED VIEW user_tx_daily")
+        .await
+        .unwrap();
+    let daily_after: i64 = conn
+        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(daily_after, 1, "healed row must now appear in user_tx_daily");
+}
+
+/// I3 regression: a walletv2 peg-in's amount comes from balance inference
+/// (`fmo_module_walletv2` returns `amount: None`), which runs asynchronously in
+/// `refresh_views_inner`. Gold folds the row before that, so `amount_msat` is
+/// NULL. After inference fills the underlying input amount, the refresh-cycle
+/// self-heal (`heal_gold`) must backfill the user_transaction amount/fee.
+#[tokio::test]
+async fn heal_gold_backfills_walletv2_pegin_amount_after_inference() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+
+    // walletv2 peg-in: input amount is NULL (module can't decode it), output
+    // mintv2 amount is known. Balance inference will later fill the input.
+    let peg_in_txid = vec![0x41u8; 32];
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        "INSERT INTO transactions (federation_id, txid, session_index, item_index, data)
+         VALUES ($1, $2, 1, 0, $3)",
+        &[&fed, &peg_in_txid, &vec![0u8; 1]],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transaction_inputs (federation_id, txid, in_index, kind, amount_msat)
+         VALUES ($1, $2, 0, 'walletv2', NULL)",
+        &[&fed, &peg_in_txid],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transaction_outputs (federation_id, txid, out_index, kind, amount_msat)
+         VALUES ($1, $2, 0, 'mintv2', 100000)",
+        &[&fed, &peg_in_txid],
+    )
+    .await
+    .unwrap();
+    // module_progress so inference considers session 1 fully processed
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('mintv2', $1, 2), ('walletv2', $1, 2)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    // Fold BEFORE inference: amount is NULL.
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+    let row = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("kind"), "peg_in_v2");
+    assert_eq!(row.get::<_, String>("direction"), "in");
+    let amt_before: Option<i64> = row.get("amount_msat");
+    assert!(amt_before.is_none(), "amount must be NULL before inference fills the input");
+
+    // Refresh cycle: inference fills the input amount, then heal backfills gold.
+    let (inputs, _outputs) = fmo_core::amounts::infer_missing_amounts(&conn).await.unwrap();
+    assert_eq!(inputs, 1, "inference must fill the one NULL walletv2 input");
+    fmo_core::gold::heal_gold(&conn).await.unwrap();
+
+    let row = conn
+        .query_one(
+            "SELECT amount_msat, fedimint_fee_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<_, Option<i64>>("amount_msat"),
+        Some(100_000),
+        "heal must backfill the peg_in_v2 amount from the inferred input"
+    );
+    assert_eq!(
+        row.get::<_, Option<i64>>("fedimint_fee_msat"),
+        Some(0),
+        "fee = inputs - outputs = 100000 - 100000 = 0 after inference"
+    );
+}
+
 /// LN receive spanning three sessions: offer (session 1, no legs of
 /// interest), fund (session 2, mint-in 10000 -> ln-out funding contract C),
 /// claim (session 3, ln-in C -> mint-out). One `ln_receive` user_transaction

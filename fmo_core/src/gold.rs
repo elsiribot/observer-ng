@@ -78,8 +78,13 @@ pub async fn fold_standalone(
                 CASE
                   WHEN i.kinds @> ARRAY['wallet'] AND NOT (i.kinds && ARRAY['ln','lnv2']) THEN 'peg_in'
                   WHEN o.kinds @> ARRAY['wallet'] AND NOT (o.kinds && ARRAY['ln','lnv2']) THEN 'peg_out'
-                  WHEN o.kinds @> ARRAY['walletv2'] THEN 'peg_in_v2'
-                  WHEN i.kinds @> ARRAY['walletv2'] THEN 'peg_out_v2'
+                  -- walletv2 mirrors v1: an INPUT is a deposit/peg-in (money
+                  -- entering), an OUTPUT is a withdrawal/peg-out.
+                  WHEN i.kinds @> ARRAY['walletv2'] THEN 'peg_in_v2'
+                  WHEN o.kinds @> ARRAY['walletv2'] THEN 'peg_out_v2'
+                  -- stability_pool is unobserved (no module decodes it): its
+                  -- amount_msat/fedimint_fee_msat may be NULL by design and
+                  -- stay NULL — there is no source to infer them from.
                   WHEN (i.kinds && ARRAY['stability_pool','multi_sig_stability_pool'])
                     OR (o.kinds && ARRAY['stability_pool','multi_sig_stability_pool']) THEN 'stability_pool'
                   WHEN i.kinds <@ ARRAY['mint'] AND o.kinds <@ ARRAY['mint'] THEN 'ecash_transfer'
@@ -87,23 +92,31 @@ pub async fn fold_standalone(
                   ELSE 'other'
                 END AS kind,
                 CASE
-                  WHEN i.kinds @> ARRAY['wallet'] OR o.kinds @> ARRAY['walletv2'] THEN 'in'
-                  WHEN o.kinds @> ARRAY['wallet'] OR i.kinds @> ARRAY['walletv2'] THEN 'out'
+                  WHEN i.kinds @> ARRAY['wallet'] OR i.kinds @> ARRAY['walletv2'] THEN 'in'
+                  WHEN o.kinds @> ARRAY['wallet'] OR o.kinds @> ARRAY['walletv2'] THEN 'out'
                   ELSE 'internal'
                 END AS direction,
-                -- primary value: wallet side for pegs, else input side
+                -- primary value: wallet side for pegs, else input side. For
+                -- walletv2 peg-ins the walletv2 INPUT carries the amount (which
+                -- `fmo_module_walletv2` leaves NULL until balance inference
+                -- fills it — see infer_missing_amounts / heal_gold), for
+                -- peg-outs the walletv2 OUTPUT does.
                 CASE
                   WHEN i.kinds @> ARRAY['wallet'] THEN i.wallet_amt
                   WHEN o.kinds @> ARRAY['wallet'] THEN o.wallet_amt
+                  WHEN i.kinds @> ARRAY['walletv2'] THEN i.walletv2_amt
+                  WHEN o.kinds @> ARRAY['walletv2'] THEN o.walletv2_amt
                   ELSE i.amt END AS amount_msat,
                 (i.amt - o.amt) AS fedimint_fee_msat,
                 1, t.session_index, st.estimated_session_timestamp, st.estimated_session_timestamp, 'completed'
          FROM transactions t
          JOIN LATERAL (SELECT array_agg(DISTINCT kind) kinds, SUM(amount_msat) amt,
-                              SUM(amount_msat) FILTER (WHERE kind='wallet') wallet_amt
+                              SUM(amount_msat) FILTER (WHERE kind='wallet') wallet_amt,
+                              SUM(amount_msat) FILTER (WHERE kind='walletv2') walletv2_amt
                        FROM transaction_inputs WHERE federation_id=t.federation_id AND txid=t.txid) i ON true
          JOIN LATERAL (SELECT array_agg(DISTINCT kind) kinds, SUM(amount_msat) amt,
-                              SUM(amount_msat) FILTER (WHERE kind='wallet') wallet_amt
+                              SUM(amount_msat) FILTER (WHERE kind='wallet') wallet_amt,
+                              SUM(amount_msat) FILTER (WHERE kind='walletv2') walletv2_amt
                        FROM transaction_outputs WHERE federation_id=t.federation_id AND txid=t.txid) o ON true
          LEFT JOIN session_times st ON st.federation_id=t.federation_id AND st.session_index=t.session_index
          WHERE t.federation_id=$1 AND t.session_index>=$2 AND t.session_index<$3
@@ -445,6 +458,73 @@ pub async fn fold_sessions(
     Ok(())
 }
 
+/// Self-heals the gold layer against the async silver-enrichment race.
+///
+/// The gold processor folds a session as soon as every module has processed it,
+/// but two pieces of silver enrichment run LATER, asynchronously, in
+/// `refresh_views_inner`:
+/// - `session_times` (the source of `first_timestamp`) is a matview refreshed
+///   there, so gold routinely folds a row before its timestamp exists.
+/// - `infer_missing_amounts` fills `transaction_inputs/outputs.amount_msat`
+///   that modules leave NULL (walletv2 peg-in claims), also there.
+///
+/// Because the gold cursor only moves forward, those rows would keep their NULL
+/// `first_timestamp`/`amount_msat` forever — and `user_tx_daily`'s
+/// `WHERE first_timestamp IS NOT NULL` silently drops timestamp-less rows. This
+/// repairs both, and MUST be called after `session_times` is refreshed and
+/// `infer_missing_amounts` has run, but before `user_tx_daily` is refreshed.
+///
+/// Both backfills are bounded (they only touch rows still NULL whose source is
+/// now non-NULL) and terminate: `session_times` forward-fills and inference is
+/// monotonic, so a repaired row is never revisited.
+///
+/// Note: genuinely-unobserved kinds (e.g. `stability_pool`) have no amount
+/// source and are intentionally left NULL — the amount heal only targets
+/// `peg_in_v2`, whose amount comes from the (now-inferred) walletv2 input.
+pub async fn heal_gold(conn: &impl deadpool_postgres::GenericClient) -> anyhow::Result<()> {
+    // I2: backfill first_timestamp from session_times via first_session_index.
+    conn.execute(
+        "UPDATE user_transactions ut
+         SET first_timestamp = st.estimated_session_timestamp
+         FROM session_times st
+         WHERE st.federation_id = ut.federation_id
+           AND st.session_index = ut.first_session_index
+           AND ut.first_timestamp IS NULL",
+        &[],
+    )
+    .await?;
+
+    // I3: backfill amount_msat/fedimint_fee_msat for walletv2 peg-ins whose
+    // walletv2 input amount was NULL at fold time and is now inferred. Bounded
+    // to currently-NULL peg_in_v2 rows whose walletv2 input is now non-NULL, so
+    // legitimately-NULL rows are never re-touched.
+    conn.execute(
+        "UPDATE user_transactions ut
+         SET amount_msat = wv2.walletv2_amt,
+             fedimint_fee_msat = wv2.in_total - wv2.out_total
+         FROM (
+             SELECT ti.federation_id, ti.txid,
+                    SUM(ti.amount_msat) FILTER (WHERE ti.kind = 'walletv2') AS walletv2_amt,
+                    SUM(ti.amount_msat) AS in_total,
+                    (SELECT SUM(o.amount_msat) FROM transaction_outputs o
+                      WHERE o.federation_id = ti.federation_id AND o.txid = ti.txid) AS out_total
+             FROM transaction_inputs ti
+             GROUP BY ti.federation_id, ti.txid
+         ) wv2
+         WHERE ut.federation_id = wv2.federation_id
+           AND ut.user_tx_key = wv2.txid
+           AND ut.kind = 'peg_in_v2'
+           AND ut.amount_msat IS NULL
+           AND wv2.walletv2_amt IS NOT NULL
+           AND wv2.in_total IS NOT NULL
+           AND wv2.out_total IS NOT NULL",
+        &[],
+    )
+    .await?;
+
+    Ok(())
+}
+
 /// Background task: incrementally folds one federation's structural
 /// transactions into the gold (user-transaction) tables. The gold cursor
 /// trails `min(module_progress.next_session_index)` — i.e. it never reads
@@ -456,6 +536,15 @@ pub async fn run_gold_processor(
 ) -> anyhow::Result<()> {
     const BATCH: i32 = 500;
     let fedb = fed.consensus_encode_to_vec();
+    // All installed module kinds. `dispatch` treats a registered module with no
+    // `module_progress` row as cursor 0, so gold must too — otherwise on a fresh
+    // federation it would fold a range seeing module A's row while B's is still
+    // absent, permanently misclassifying B's first-batch legs as standalone.
+    let module_kinds: Vec<String> = observer
+        .registry()
+        .iter()
+        .map(|(kind, _)| kind.to_string())
+        .collect();
     loop {
         let conn = observer.pool().get().await?;
         conn.execute(
@@ -463,11 +552,15 @@ pub async fn run_gold_processor(
             &[&fedb],
         )
         .await?;
-        // target = min over installed module cursors for this federation
+        // target = min over ALL installed module cursors (missing row => 0), so
+        // gold never advances past a module that hasn't started.
         let target: i32 = conn
             .query_one(
-                "SELECT COALESCE(MIN(next_session_index), 0) FROM module_progress WHERE federation_id=$1",
-                &[&fedb],
+                "SELECT COALESCE(MIN(COALESCE(mp.next_session_index, 0)), 0)
+                 FROM unnest($2::text[]) AS k(module_kind)
+                 LEFT JOIN module_progress mp
+                   ON mp.module_kind = k.module_kind AND mp.federation_id = $1",
+                &[&fedb, &module_kinds],
             )
             .await?
             .get(0);

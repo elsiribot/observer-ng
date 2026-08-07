@@ -9,7 +9,7 @@ use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::task::TaskGroup;
 use tokio_postgres::NoTls;
-use tracing::{error, info_span, warn, Instrument};
+use tracing::{error, info_span, Instrument};
 
 use crate::db::migrations::{setup_core_schema, setup_module_schema};
 use crate::federation::Federation;
@@ -250,8 +250,12 @@ impl FederationObserver {
             self.task_group.spawn_cancellable(
                 format!("gold {federation_id}"),
                 async move {
-                    if let Err(e) = crate::gold::run_gold_processor(observer, federation_id).await {
-                        warn!("gold processor: {e:?}");
+                    loop {
+                        let e = crate::gold::run_gold_processor(observer.clone(), federation_id)
+                            .await
+                            .expect_err("gold processor task exited unexpectedly");
+                        error!("Gold processor errored, restarting in 30s: {e}");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                     }
                 }
                 .instrument(info_span!("gold", fed = %federation_id.to_prefix())),
