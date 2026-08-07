@@ -677,3 +677,77 @@ async fn fold_sessions_without_ln_modules_installed_does_not_error() {
         .unwrap();
     assert_eq!(row.get::<_, String>("kind"), "ecash_transfer");
 }
+
+/// An unpaid Lightning invoice: an lnv1 `offer` output with NO fund and NO
+/// claim. It moved no value, so per spec it is not a user transaction and
+/// must produce neither a `user_transactions` row nor a membership row.
+/// Regression guard: the membership insert must not emit an orphan
+/// `user_transaction_txs` row keyed by a contract with no parent
+/// `user_transactions` row — that would violate the FK and stall the gold
+/// processor for the whole federation (production has hundreds of thousands
+/// of unpaid invoices).
+#[tokio::test]
+async fn fold_ln_offer_only_unfunded_invoice_produces_nothing() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    create_ln_schemas(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+
+    let contract_id = vec![0xE0u8; 32];
+    let offer_txid = vec![0xC1u8; 32];
+
+    insert_ln_contract(&pool, &fed, &contract_id, "incoming").await;
+
+    // offer leg only: no fund output, no claim input
+    insert_bare_tx(&pool, &fed, &offer_txid, 1).await;
+    insert_tx_output(&pool, &fed, &offer_txid, 0, "ln", 0).await;
+    insert_ln_output_contract(&pool, &fed, &offer_txid, 0, "offer", &contract_id).await;
+
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .expect("fold_sessions must not error on an unfunded offer-only contract");
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+    let user_tx_count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(user_tx_count, 0, "unfunded offer is not a user transaction");
+    let membership_count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM user_transaction_txs WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(membership_count, 0, "no orphan membership rows for an unfunded offer");
+}

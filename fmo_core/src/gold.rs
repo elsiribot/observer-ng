@@ -226,11 +226,18 @@ async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) ->
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
 
+    // Only emit membership rows for contracts that produced a parent
+    // `user_transactions` row (i.e. funded contracts). An offer-only,
+    // unfunded invoice moves no value and is INNER-JOINed out of the upsert
+    // above, so it has no parent — inserting a membership row for it would
+    // violate the FK and stall the whole federation's gold processor.
     let query = format!(
         "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
          SELECT oc.federation_id, oc.txid, oc.contract_id, oc.interaction_kind, t.session_index
            FROM fmo_ln.output_contracts oc JOIN transactions t USING (federation_id, txid)
            WHERE (oc.federation_id, oc.contract_id) IN {LN_TOUCHED_CONTRACTS}
+             AND EXISTS (SELECT 1 FROM user_transactions ut
+                          WHERE ut.federation_id=oc.federation_id AND ut.user_tx_key=oc.contract_id)
          UNION ALL
          SELECT ic.federation_id, ic.txid, ic.contract_id,
                 CASE WHEN EXISTS (SELECT 1 FROM fmo_ln.output_contracts x
@@ -239,6 +246,8 @@ async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) ->
                 t.session_index
            FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)
            WHERE (ic.federation_id, ic.contract_id) IN {LN_TOUCHED_CONTRACTS}
+             AND EXISTS (SELECT 1 FROM user_transactions ut
+                          WHERE ut.federation_id=ic.federation_id AND ut.user_tx_key=ic.contract_id)
          ON CONFLICT DO NOTHING"
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
@@ -292,11 +301,18 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
 
+    // As in lnv1, only emit membership rows for contracts with a parent
+    // `user_transactions` row. An lnv2 `contracts` row always carries an
+    // amount and funding outpoint (there is no offer-only concept), so it
+    // always produces a parent — but the guard is kept symmetric with lnv1 so
+    // no code path can ever insert an orphan membership row.
     let query = format!(
         "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
          SELECT c.federation_id, c.txid, c.contract_id, 'fund', t.session_index
            FROM fmo_lnv2.contracts c JOIN transactions t USING (federation_id, txid)
            WHERE (c.federation_id, c.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
+             AND EXISTS (SELECT 1 FROM user_transactions ut
+                          WHERE ut.federation_id=c.federation_id AND ut.user_tx_key=c.contract_id)
          UNION ALL
          SELECT io.federation_id, io.txid, c2.contract_id, 'claim', t.session_index
            FROM fmo_lnv2.input_outpoints io
@@ -304,6 +320,8 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
              AND c2.txid=io.outpoint_txid AND c2.out_index=io.outpoint_out_index
            JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid
            WHERE (c2.federation_id, c2.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
+             AND EXISTS (SELECT 1 FROM user_transactions ut
+                          WHERE ut.federation_id=c2.federation_id AND ut.user_tx_key=c2.contract_id)
          ON CONFLICT DO NOTHING"
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
