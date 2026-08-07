@@ -76,16 +76,29 @@ Two-pass classification of every raw fedimint tx:
 - **`fedimint_fee_msat` — exact.** A fedimint tx balances, so the federation's
   fee = `Σ input amount_msat − Σ output amount_msat` per leg, summed across the
   user tx's legs.
-- **`gateway_fee_msat` — estimate, LN only.** The gateway's LN markup is
-  **off-ledger**: `OutgoingContract` carries no invoice amount, only the
-  contract amount the user locked. Estimated from the paying gateway's
-  advertised fee schedule (`fmo_ln.gateways.raw → fees.base_msat +
-  proportional_millionths`, matched by `gateway_key`):
-  `gw_fee ≈ base + ppm·invoice/1e6`, solving `contract = invoice + gw_fee`.
-  NULL for non-LN and when the gateway/fee schedule is unknown.
-  **Caveat:** advertised ≠ actually-charged, and we only poll *current*
-  schedules, so historical estimates drift. This column is explicitly an
-  estimate; `fedimint_fee_msat` is not.
+- **`gateway_fee_msat` — estimate, outgoing (send) LN/LNv2 only.** We only
+  track the gateway fee on **sends**, because the sender is the party that pays
+  it (an outgoing contract is funded with `invoice + gateway_fee`; the gateway
+  claims the whole thing and keeps the markup). It is **NULL for receives**
+  (on the receive side the gateway's cut comes out of the off-ledger LN amount
+  and is not the observed user's cost) and NULL for non-LN.
+  Even scoped to sends it can only be **estimated**, not derived exactly: the
+  invoice amount is off-ledger. `OutgoingContract` has no amount field (only
+  the gross contract amount is recorded), and there is no separate fee output —
+  the gateway claims the full contract amount. **Empirically confirmed**
+  (2026-08-07) there is no on-ledger LN amount to exploit: for incoming
+  contracts the Offer's `amount` equals the funded amount in every case
+  (10000/10000, 27336/27336, …), i.e. on-ledger amounts are all fedimint-side,
+  never the gross Lightning amount.
+  Estimate: match the contract's `gateway_key` to the gateway's advertised fee
+  schedule (`fmo_ln.gateways.raw → fees.base_msat + proportional_millionths`)
+  and solve `contract = invoice + base + ppm·invoice/1e6` for
+  `gateway_fee = contract − invoice`. **Caveat:** advertised ≠ actually-charged
+  and we only poll *current* schedules, so historical estimates drift. This
+  column is explicitly an estimate; `fedimint_fee_msat` is exact.
+  (A heavier alternative — polling each gateway's own payment API for real
+  invoice amounts — is out of scope: live-only, per-gateway, not always
+  exposed, and breaks the offline-from-raw-sessions model.)
 
 ## Architecture: incremental gold layer
 
@@ -133,7 +146,11 @@ idempotency: reprocessing any leg reproduces the identical final row.
 
 1. `ecash_transfer` over-counts real payments by the share that are automatic
    note-refreshes — no consensus signal separates them (accepted per decision).
-2. `gateway_fee_msat` is an estimate from advertised fees (see Fees).
+2. `gateway_fee_msat` is populated only on outgoing/send LN rows (v1 **and** v2
+   — both record only the gross contract amount, neither the invoice). It is a
+   deterministic inversion of the gateway's advertised `(base, ppm)`: exact
+   when we have the schedule the gateway used at creation time, degrading to an
+   estimate for historical contracts or after fee-schedule changes (see Fees).
 3. A rare atomic multi-module tx (e.g. fund + peg-out) is attributed to each
    linked user tx and documented where it occurs.
 4. Double-funded contracts (recurringd resets) collapse to one user tx per
