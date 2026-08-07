@@ -329,8 +329,75 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
     Ok(())
 }
 
+/// Estimates `gateway_fee_estimate_msat` for outgoing LN (`ln_send`) rows
+/// touched in session range `[start, end)`. The gateway fee is not on-ledger
+/// — a gateway is paid out-of-band for forwarding the payment — so it's
+/// estimated by inverting the gateway's advertised fee schedule against the
+/// gross contract amount: `contract = invoice + base + ppm·invoice/1e6`, so
+/// `invoice = (contract − base) / (1 + ppm/1e6)` and
+/// `gateway_fee_estimate_msat = contract − invoice`.
+///
+/// **Join path (confirmed against production data 2026-08-07, read-only
+/// spike, see task-4 report):**
+/// - The fund leg's output `details` JSON (serialized `LightningOutput`)
+///   carries the gateway's pubkey at
+///   `{V0,Contract,contract,Outgoing,gateway_key}`.
+/// - That key is `OutgoingContract.gateway_key`, which fedimint sets to
+///   `LightningGateway.gateway_redeem_key` — a *different* key from both
+///   `gateway_id` and `node_pub_key` (verified live: 0/128 distinct
+///   `gateway_key` values matched `fmo_ln.gateways.gateway_id` or
+///   `.node_pub_key`; 117/128 matched `raw #>> '{info,gateway_redeem_key}'`,
+///   the rest presumably gateways that have since rotated keys or
+///   deregistered). So the join is on `raw->info->gateway_redeem_key`, not on
+///   either indexed column.
+/// - The fee schedule lives at `raw #>> '{info,fees,base_msat}'` /
+///   `{info,fees,proportional_millionths}` — nested under `info` (the
+///   `LightningGatewayAnnouncement` shape the gateway poller stores), not at
+///   the top level.
+///
+/// Left NULL for `ln_receive` (no gateway fee on the receive side), all
+/// non-LN kinds, and whenever no matching gateway/fee schedule is found
+/// (deregistered gateway, rotated redeem key, missing raw fee fields, etc).
+/// Guarded on `fmo_ln.gateways` existing so instances without the LN module
+/// (or without any gateway ever polled) skip cleanly.
+///
+/// No LNv2 analogue: lnv2 outgoing contracts (`fmo_lnv2.contracts`) don't
+/// carry a gateway key in their structural facts, and there is no
+/// `fmo_lnv2.gateways` table or any other fee-schedule source in this
+/// observer at all, so `lnv2_send` rows are left NULL.
+async fn estimate_ln_gateway_fees(
+    dbtx: &Transaction<'_>,
+    fed: &[u8],
+    start: i32,
+    end: i32,
+) -> anyhow::Result<()> {
+    if !table_exists(dbtx, "fmo_ln.gateways").await? {
+        return Ok(());
+    }
+    dbtx.execute(
+        "UPDATE user_transactions ut SET gateway_fee_estimate_msat =
+            ut.amount_msat - ROUND((ut.amount_msat - g.base) / (1 + g.ppm / 1000000.0))
+         FROM (SELECT oc.federation_id, oc.contract_id,
+                      (gw.raw #>> '{info,fees,base_msat}')::numeric base,
+                      (gw.raw #>> '{info,fees,proportional_millionths}')::numeric ppm
+               FROM fmo_ln.output_contracts oc
+               JOIN transaction_outputs o USING (federation_id, txid, out_index)
+               JOIN fmo_ln.gateways gw ON gw.federation_id = oc.federation_id
+                    AND gw.raw #>> '{info,gateway_redeem_key}' =
+                        (o.details #>> '{V0,Contract,contract,Outgoing,gateway_key}')
+               WHERE oc.interaction_kind = 'fund') g
+         WHERE ut.federation_id = g.federation_id AND ut.user_tx_key = g.contract_id
+           AND ut.kind = 'ln_send'
+           AND ut.federation_id = $1 AND ut.first_session_index >= $2 AND ut.first_session_index < $3",
+        &[&fed, &start, &end],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Folds session range `[start, end)` into the gold layer: standalone
-/// (non-LN) classification plus LN/LNv2 contract grouping.
+/// (non-LN) classification, LN/LNv2 contract grouping, and gateway fee
+/// estimation for outgoing LN sends.
 pub async fn fold_sessions(
     dbtx: &Transaction<'_>,
     fed: &[u8],
@@ -339,6 +406,7 @@ pub async fn fold_sessions(
 ) -> anyhow::Result<()> {
     fold_standalone(dbtx, fed, start, end).await?;
     fold_ln(dbtx, fed, start, end).await?;
+    estimate_ln_gateway_fees(dbtx, fed, start, end).await?;
     Ok(())
 }
 

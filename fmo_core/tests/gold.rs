@@ -6,8 +6,9 @@ use fedimint_core::encoding::Encodable;
 /// Creates the real `fmo_ln` / `fmo_lnv2` schemas (mirroring
 /// `fmo_modules/fmo_module_ln/schema/v0.sql` and
 /// `fmo_modules/fmo_module_lnv2/schema/v0.sql`, minus the parts gold folding
-/// never reads: gateways, decryption shares). Raw SQL rather than
-/// `setup_module_schema` — depending on `fmo_module_ln`/`fmo_module_lnv2`
+/// never reads: decryption shares). Includes `fmo_ln.gateways` since
+/// `estimate_ln_gateway_fees` reads its `raw` fee schedule. Raw SQL rather
+/// than `setup_module_schema` — depending on `fmo_module_ln`/`fmo_module_lnv2`
 /// from `fmo_core`'s tests would create a dependency cycle since those crates
 /// depend on `fmo_core`.
 ///
@@ -47,6 +48,18 @@ async fn create_ln_schemas(pool: &deadpool_postgres::Pool) {
                  PRIMARY KEY (federation_id, txid, out_index),
                  FOREIGN KEY (federation_id, txid, out_index)
                      REFERENCES public.transaction_outputs (federation_id, txid, out_index)
+             );
+             CREATE TABLE IF NOT EXISTS fmo_ln.gateways (
+                 federation_id   BYTEA       NOT NULL REFERENCES public.federations (federation_id),
+                 gateway_id      TEXT        NOT NULL,
+                 node_pub_key    TEXT        NOT NULL,
+                 api_endpoint    TEXT        NOT NULL,
+                 lightning_alias TEXT        NOT NULL,
+                 vetted          BOOLEAN     NOT NULL DEFAULT FALSE,
+                 raw             JSONB       NOT NULL,
+                 first_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                 last_seen       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                 PRIMARY KEY (federation_id, gateway_id)
              );
              CREATE SCHEMA IF NOT EXISTS fmo_lnv2;
              CREATE TABLE IF NOT EXISTS fmo_lnv2.contracts (
@@ -125,6 +138,67 @@ async fn insert_tx_output(
             "INSERT INTO transaction_outputs (federation_id, txid, out_index, kind, amount_msat)
              VALUES ($1, $2, $3, $4, $5)",
             &[&fed, &txid, &out_index, &kind, &amount_msat],
+        )
+        .await
+        .unwrap();
+}
+
+/// Inserts a fund-leg output carrying a `details` JSON shaped like the real
+/// `LightningOutput` serialization (confirmed against production 2026-08-07):
+/// `{"V0":{"Contract":{"contract":{"Outgoing":{"gateway_key":"..."}}}}}`.
+/// Used by the gateway-fee-estimate test to exercise the same JSON path
+/// `estimate_ln_gateway_fees` reads.
+async fn insert_ln_fund_output_with_gateway_key(
+    pool: &deadpool_postgres::Pool,
+    fed: &[u8],
+    txid: &[u8],
+    out_index: i32,
+    amount_msat: i64,
+    gateway_key: &str,
+) {
+    let details = serde_json::json!({
+        "V0": {"Contract": {"contract": {"Outgoing": {"gateway_key": gateway_key}}}}
+    });
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO transaction_outputs (federation_id, txid, out_index, kind, amount_msat, details)
+             VALUES ($1, $2, $3, 'ln', $4, $5)",
+            &[&fed, &txid, &out_index, &amount_msat, &details],
+        )
+        .await
+        .unwrap();
+}
+
+/// Inserts an `fmo_ln.gateways` row with a `raw` blob shaped like the real
+/// gateway poller's stored JSON (confirmed against production 2026-08-07):
+/// `{"info":{"gateway_redeem_key":"...","fees":{"base_msat":...,"proportional_millionths":...}}}`.
+/// `gateway_redeem_key` — NOT `gateway_id`/`node_pub_key` — is the column
+/// `OutgoingContract.gateway_key` matches (verified live: 0/128 matched
+/// `gateway_id`/`node_pub_key`, 117/128 matched `raw->info->gateway_redeem_key`).
+async fn insert_ln_gateway(
+    pool: &deadpool_postgres::Pool,
+    fed: &[u8],
+    gateway_id: &str,
+    gateway_redeem_key: &str,
+    base_msat: i64,
+    proportional_millionths: i64,
+) {
+    let raw = serde_json::json!({
+        "info": {
+            "gateway_redeem_key": gateway_redeem_key,
+            "fees": {"base_msat": base_msat, "proportional_millionths": proportional_millionths}
+        }
+    });
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO fmo_ln.gateways
+                (federation_id, gateway_id, node_pub_key, api_endpoint, lightning_alias, raw)
+             VALUES ($1, $2, $3, 'https://example.com', 'test gateway', $4)",
+            &[&fed, &gateway_id, &gateway_id, &raw],
         )
         .await
         .unwrap();
@@ -750,4 +824,144 @@ async fn fold_ln_offer_only_unfunded_invoice_produces_nothing() {
         .unwrap()
         .get(0);
     assert_eq!(membership_count, 0, "no orphan membership rows for an unfunded offer");
+}
+
+/// `gateway_fee_estimate_msat` for outgoing LN sends: the gateway fee isn't
+/// on-ledger, so it's estimated by inverting the gateway's advertised fee
+/// schedule against the gross contract amount. Contract funded for 10520
+/// msat, gateway advertises base_msat=2000, proportional_millionths=5000
+/// (0.5%): invoice = (10520-2000)/(1+5000/1e6) ≈ 8477.6, so
+/// gateway_fee_estimate_msat = 10520 - round(invoice) ≈ 2043 (±1 for
+/// rounding). An `ln_receive` row and a non-LN (`peg_in`) row touched in the
+/// same batch must stay NULL — the gateway fee only applies to the outgoing
+/// leg of a payment.
+#[tokio::test]
+async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    create_ln_schemas(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+
+    let gateway_key = "02aabbccddeeff00112233445566778899aabbccddeeff00112233445566778";
+    insert_ln_gateway(&pool, &fed, "gw1", gateway_key, 2000, 5000).await;
+
+    // outgoing (ln_send) contract funded 10520 msat via a gateway with a
+    // known fee schedule
+    let send_contract_id = vec![0xF0u8; 32];
+    let send_fund_txid = vec![0xF1u8; 32];
+    insert_ln_contract(&pool, &fed, &send_contract_id, "outgoing").await;
+    insert_bare_tx(&pool, &fed, &send_fund_txid, 1).await;
+    insert_tx_input(&pool, &fed, &send_fund_txid, 0, "mint", 10_520).await;
+    insert_ln_fund_output_with_gateway_key(
+        &pool,
+        &fed,
+        &send_fund_txid,
+        0,
+        10_520,
+        gateway_key,
+    )
+    .await;
+    insert_ln_output_contract(&pool, &fed, &send_fund_txid, 0, "fund", &send_contract_id).await;
+
+    // incoming (ln_receive) contract — no gateway fee applies
+    let recv_contract_id = vec![0xF2u8; 32];
+    let recv_fund_txid = vec![0xF3u8; 32];
+    insert_ln_contract(&pool, &fed, &recv_contract_id, "incoming").await;
+    insert_bare_tx(&pool, &fed, &recv_fund_txid, 1).await;
+    insert_tx_input(&pool, &fed, &recv_fund_txid, 0, "mint", 5_000).await;
+    insert_tx_output(&pool, &fed, &recv_fund_txid, 0, "ln", 5_000).await;
+    insert_ln_output_contract(&pool, &fed, &recv_fund_txid, 0, "fund", &recv_contract_id).await;
+
+    // non-LN (peg_in) standalone tx — kind != ln_send, must stay untouched
+    let peg_in_txid = vec![0xF4u8; 32];
+    insert_tx(&pool, &fed, &peg_in_txid, 1, "wallet", 1_000, "mint", 990).await;
+
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+
+    let fee: Option<i64> = conn
+        .query_one(
+            "SELECT gateway_fee_estimate_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &send_contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let fee = fee.expect("ln_send row must have a gateway fee estimate");
+    assert!(
+        (2042..=2044).contains(&fee),
+        "expected gateway_fee_estimate_msat ~= 2043 (+/-1), got {fee}"
+    );
+
+    let recv_fee: Option<i64> = conn
+        .query_one(
+            "SELECT gateway_fee_estimate_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &recv_contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(recv_fee, None, "ln_receive must not get a gateway fee estimate");
+
+    let peg_in_fee: Option<i64> = conn
+        .query_one(
+            "SELECT gateway_fee_estimate_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &peg_in_txid],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(peg_in_fee, None, "non-LN rows must not get a gateway fee estimate");
+    drop(conn);
+
+    // idempotent: re-running changes nothing
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+    let conn = pool.get().await.unwrap();
+    let fee_again: Option<i64> = conn
+        .query_one(
+            "SELECT gateway_fee_estimate_msat FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &send_contract_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(fee_again, Some(fee), "idempotent: value unchanged");
 }
