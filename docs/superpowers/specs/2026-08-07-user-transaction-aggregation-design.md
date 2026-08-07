@@ -76,7 +76,7 @@ Two-pass classification of every raw fedimint tx:
 - **`fedimint_fee_msat` — exact.** A fedimint tx balances, so the federation's
   fee = `Σ input amount_msat − Σ output amount_msat` per leg, summed across the
   user tx's legs.
-- **`gateway_fee_msat` — estimate, outgoing (send) LN/LNv2 only.** We only
+- **`gateway_fee_estimate_msat` — estimate, outgoing (send) LN/LNv2 only.** We only
   track the gateway fee on **sends**, because the sender is the party that pays
   it (an outgoing contract is funded with `invoice + gateway_fee`; the gateway
   claims the whole thing and keeps the markup). It is **NULL for receives**
@@ -129,13 +129,13 @@ idempotency: reprocessing any leg reproduces the identical final row.
 
 1. **`user_transactions`** (grain, one row per deduped user tx):
    `federation_id, user_tx_key, kind (ln_send/…), direction, amount_msat,
-   fedimint_fee_msat, gateway_fee_msat, num_fedimint_txs, first_session_index,
+   fedimint_fee_msat, gateway_fee_estimate_msat, num_fedimint_txs, first_session_index,
    first_timestamp, last_timestamp, status`.
    Key = `contract_id` for LN, `txid` otherwise; `(federation_id, user_tx_key)`
    unique.
 2. **`user_tx_daily`** (rollup for dashboards):
    `federation_id, date, kind, direction, status, tx_count, volume_msat,
-   fedimint_fee_msat, gateway_fee_msat`. Maintained from `user_transactions`.
+   fedimint_fee_msat, gateway_fee_estimate_msat`. Maintained from `user_transactions`.
 3. *(optional)* **`user_tx_federation_totals`** — all-time count + volume +
    fees per federation per kind.
 
@@ -146,7 +146,7 @@ idempotency: reprocessing any leg reproduces the identical final row.
 
 1. `ecash_transfer` over-counts real payments by the share that are automatic
    note-refreshes — no consensus signal separates them (accepted per decision).
-2. `gateway_fee_msat` is populated only on outgoing/send LN rows (v1 **and** v2
+2. `gateway_fee_estimate_msat` is populated only on outgoing/send LN rows (v1 **and** v2
    — both record only the gross contract amount, neither the invoice). It is a
    deterministic inversion of the gateway's advertised `(base, ppm)`: exact
    when we have the schedule the gateway used at creation time, degrading to an
@@ -163,5 +163,5 @@ idempotency: reprocessing any leg reproduces the identical final row.
    signature, `fedimint_fee_msat`. Tests on peg-in/out/ecash shapes.
 2. **LN/LNv2 contract grouping** — recompute-per-contract, `status`,
    `num_fedimint_txs`, timestamps. Tests on offer/fund/claim collapse.
-3. **`gateway_fee_msat` estimate** — join to gateway fee schedule.
+3. **`gateway_fee_estimate_msat` estimate** — join to gateway fee schedule.
 4. **Rollups** (`user_tx_daily`, totals) + optional API endpoints.
