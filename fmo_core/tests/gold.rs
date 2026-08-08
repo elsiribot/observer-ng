@@ -985,6 +985,221 @@ async fn fold_ln_without_claim_is_in_flight() {
     assert_eq!(row.get::<_, i64>("amount_msat"), 5_000);
 }
 
+/// Perf-fix regression: `fold_ln_v1`'s `funds`/`legs` subqueries must be
+/// scoped to `LN_TOUCHED_CONTRACTS` (this batch's touched contracts) rather
+/// than aggregating over every contract in `fmo_ln` — an unscoped aggregation
+/// turned each 500-session batch into a full-table scan (30-60 minutes in
+/// production, with 100k-266k contracts per federation). This proves the
+/// scoping is correct on the two axes that matter:
+///
+/// - Contract A is touched by the SECOND batch (`[3,4)`) only via its claim
+///   leg; its fund leg was ingested and folded in an EARLIER batch
+///   (`[1,3)`), so it lives in `fmo_ln.output_contracts` at session 1, well
+///   outside `[3,4)`. `LN_TOUCHED_CONTRACTS` matches contracts by
+///   `(federation_id, contract_id)`, not by session, so the scoped
+///   `funds`/`legs` subqueries must still pick up A's session-1 fund leg to
+///   compute the right amount/status/`num_fedimint_txs` — proving the fix
+///   preserves "full lifecycle of touched contracts", not "full lifecycle of
+///   ALL contracts" (the bug) and not "only this batch's session range" (a
+///   different, equally wrong, fix).
+/// - Contract B is a fully independent, already-completed contract whose
+///   legs are entirely within the FIRST batch's range (`[1,3)`) — it has no
+///   leg in `[3,4)`, so it must be absent from `LN_TOUCHED_CONTRACTS` for the
+///   second batch and must come out of that batch byte-for-byte unchanged
+///   (not recreated, not updated). A and B are funded for different amounts,
+///   so any cross-contract contamination in the scoped subqueries would show
+///   up as a wrong amount on one of them.
+#[tokio::test]
+async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    create_ln_schemas(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    insert_session(&pool, &fed, 1).await;
+    insert_session(&pool, &fed, 2).await;
+    insert_session(&pool, &fed, 3).await;
+
+    // Contract A: fund leg only, session 1. Its claim leg doesn't exist yet
+    // (simulating that session 3 hasn't been ingested by the LN module yet).
+    let contract_a = vec![0xAAu8; 32];
+    let a_fund_txid = vec![0xA1u8; 32];
+    insert_ln_contract(&pool, &fed, &contract_a, "incoming").await;
+    insert_bare_tx(&pool, &fed, &a_fund_txid, 1).await;
+    insert_tx_input(&pool, &fed, &a_fund_txid, 0, "mint", 10_000).await;
+    insert_tx_output(&pool, &fed, &a_fund_txid, 0, "ln", 10_000).await;
+    insert_ln_output_contract(&pool, &fed, &a_fund_txid, 0, "fund", &contract_a).await;
+
+    // Contract B: unrelated, fully funded+claimed within sessions 1-2, for a
+    // different amount from A so cross-contamination would be visible.
+    let contract_b = vec![0xBBu8; 32];
+    let b_fund_txid = vec![0xB1u8; 32];
+    let b_claim_txid = vec![0xB2u8; 32];
+    insert_ln_contract(&pool, &fed, &contract_b, "incoming").await;
+    insert_bare_tx(&pool, &fed, &b_fund_txid, 1).await;
+    insert_tx_input(&pool, &fed, &b_fund_txid, 0, "mint", 7_777).await;
+    insert_tx_output(&pool, &fed, &b_fund_txid, 0, "ln", 7_777).await;
+    insert_ln_output_contract(&pool, &fed, &b_fund_txid, 0, "fund", &contract_b).await;
+    insert_bare_tx(&pool, &fed, &b_claim_txid, 2).await;
+    insert_tx_input(&pool, &fed, &b_claim_txid, 0, "ln", 7_777).await;
+    insert_tx_output(&pool, &fed, &b_claim_txid, 0, "mint", 7_777).await;
+    insert_ln_input_contract(&pool, &fed, &b_claim_txid, 0, &contract_b).await;
+
+    // First batch [1,3): folds B fully (fund+claim both in range) and A's
+    // fund leg only (A has no claim leg in the DB yet) -> A stays in_flight.
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 1, 3)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+    let b_row_before = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+             FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_b],
+        )
+        .await
+        .unwrap();
+    assert_eq!(b_row_before.get::<_, String>("status"), "completed");
+    assert_eq!(b_row_before.get::<_, i64>("amount_msat"), 7_777);
+    assert_eq!(b_row_before.get::<_, i32>("num_fedimint_txs"), 2);
+
+    let a_row_before = conn
+        .query_one(
+            "SELECT status, num_fedimint_txs FROM user_transactions
+             WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(a_row_before.get::<_, String>("status"), "in_flight");
+    assert_eq!(a_row_before.get::<_, i32>("num_fedimint_txs"), 1);
+    drop(conn);
+
+    // Now A's claim leg lands (simulating session 3 finally being ingested by
+    // the LN module).
+    let a_claim_txid = vec![0xA3u8; 32];
+    insert_bare_tx(&pool, &fed, &a_claim_txid, 3).await;
+    insert_tx_input(&pool, &fed, &a_claim_txid, 0, "ln", 10_000).await;
+    insert_tx_output(&pool, &fed, &a_claim_txid, 0, "mint", 10_000).await;
+    insert_ln_input_contract(&pool, &fed, &a_claim_txid, 0, &contract_a).await;
+
+    // Second batch [3,4): touches A only, via its claim leg. B has no leg in
+    // this range, so it must be absent from LN_TOUCHED_CONTRACTS entirely.
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 3, 4)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+
+    // A: now completed, with the FULL lifecycle amount (session-1 fund leg +
+    // session-3 claim leg) even though only the claim leg was in this batch's
+    // session range -- proving the scoped funds/legs subqueries still
+    // aggregate the touched contract's full history, not just the batch's
+    // session range, and not some blend with contract B's data.
+    let a_row_after = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+             FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(a_row_after.get::<_, String>("kind"), "ln_receive");
+    assert_eq!(a_row_after.get::<_, String>("status"), "completed");
+    assert_eq!(
+        a_row_after.get::<_, i64>("amount_msat"),
+        10_000,
+        "A's amount must be its own fund leg, not contaminated by B's"
+    );
+    assert_eq!(a_row_after.get::<_, i32>("num_fedimint_txs"), 2);
+
+    let mut a_roles: Vec<String> = conn
+        .query(
+            "SELECT role FROM user_transaction_txs
+             WHERE federation_id = $1 AND user_tx_key = $2 ORDER BY role",
+            &[&fed, &contract_a],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    a_roles.sort();
+    assert_eq!(a_roles, vec!["claim", "fund"]);
+
+    // B: byte-for-byte unchanged and not duplicated by a batch that doesn't
+    // touch any of its legs.
+    let b_row_after = conn
+        .query_one(
+            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+             FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_b],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b_row_after.get::<_, String>("kind"),
+        b_row_before.get::<_, String>("kind")
+    );
+    assert_eq!(
+        b_row_after.get::<_, String>("direction"),
+        b_row_before.get::<_, String>("direction")
+    );
+    assert_eq!(
+        b_row_after.get::<_, i64>("amount_msat"),
+        b_row_before.get::<_, i64>("amount_msat")
+    );
+    assert_eq!(
+        b_row_after.get::<_, String>("status"),
+        b_row_before.get::<_, String>("status")
+    );
+    assert_eq!(
+        b_row_after.get::<_, i32>("num_fedimint_txs"),
+        b_row_before.get::<_, i32>("num_fedimint_txs")
+    );
+
+    let b_tx_count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
+            &[&fed, &contract_b],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        b_tx_count, 1,
+        "B must not be duplicated/recreated by a batch that doesn't touch it"
+    );
+}
+
 /// Graceful degradation: an observer instance with neither the LN nor the
 /// LNv2 module installed has no `fmo_ln`/`fmo_lnv2` schema at all.
 /// `fold_sessions` (both `fold_standalone`'s guards and `fold_ln`'s blocks)

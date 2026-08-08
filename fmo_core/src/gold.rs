@@ -209,14 +209,18 @@ async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) ->
          FROM fmo_ln.contracts c
          JOIN (SELECT federation_id, contract_id, SUM(o.amount_msat) amount_msat
                FROM fmo_ln.output_contracts oc JOIN transaction_outputs o USING (federation_id, txid, out_index)
-               WHERE oc.interaction_kind='fund' GROUP BY 1,2) funds USING (federation_id, contract_id)
+               WHERE oc.interaction_kind='fund'
+                 AND (oc.federation_id, oc.contract_id) IN {LN_TOUCHED_CONTRACTS}
+               GROUP BY 1,2) funds USING (federation_id, contract_id)
          JOIN (SELECT federation_id, contract_id, COUNT(DISTINCT txid) n,
                       MIN(session_index) first_session, MAX(session_index) last_session
                FROM (SELECT oc.federation_id, oc.contract_id, oc.txid, t.session_index
                        FROM fmo_ln.output_contracts oc JOIN transactions t USING (federation_id, txid)
+                       WHERE (oc.federation_id, oc.contract_id) IN {LN_TOUCHED_CONTRACTS}
                      UNION
                      SELECT ic.federation_id, ic.contract_id, ic.txid, t.session_index
-                       FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)) all_legs
+                       FROM fmo_ln.input_contracts ic JOIN transactions t USING (federation_id, txid)
+                       WHERE (ic.federation_id, ic.contract_id) IN {LN_TOUCHED_CONTRACTS}) all_legs
                GROUP BY 1,2) legs USING (federation_id, contract_id)
          JOIN LATERAL (SELECT COALESCE(SUM(f.fee),0) fee_msat FROM (
                  SELECT (SELECT SUM(amount_msat) FROM transaction_inputs  WHERE federation_id=x.federation_id AND txid=x.txid)
@@ -286,12 +290,14 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
                       MIN(session_index) first_session, MAX(session_index) last_session
                FROM (SELECT c2.federation_id, c2.contract_id, c2.txid, t.session_index
                        FROM fmo_lnv2.contracts c2 JOIN transactions t USING (federation_id, txid)
+                       WHERE (c2.federation_id, c2.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
                      UNION
                      SELECT c2.federation_id, c2.contract_id, io.txid, t.session_index
                        FROM fmo_lnv2.input_outpoints io
                        JOIN fmo_lnv2.contracts c2 ON c2.federation_id=io.federation_id
                          AND c2.txid=io.outpoint_txid AND c2.out_index=io.outpoint_out_index
-                       JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid) all_legs
+                       JOIN transactions t ON t.federation_id=io.federation_id AND t.txid=io.txid
+                       WHERE (c2.federation_id, c2.contract_id) IN {LNV2_TOUCHED_CONTRACTS}) all_legs
                GROUP BY 1,2) legs USING (federation_id, contract_id)
          JOIN LATERAL (SELECT COALESCE(SUM(f.fee),0) fee_msat FROM (
                  SELECT (SELECT SUM(amount_msat) FROM transaction_inputs  WHERE federation_id=x.federation_id AND txid=x.txid)
