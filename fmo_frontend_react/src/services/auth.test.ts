@@ -34,17 +34,52 @@ describe('auth manager', () => {
 
   it('single-flights ensureToken: concurrent calls trigger one prompt and share one result', async () => {
     const auth = createAuthManager()
-    const onPrompt = vi.fn(() => {
-      // Simulate the user submitting the overlay shortly after being prompted.
-      auth.setToken('entered')
-    })
+    const onPrompt = vi.fn() // overlay opens; user submits later, not synchronously
     auth.registerPrompt(onPrompt)
 
-    const [a, b] = await Promise.all([auth.ensureToken(), auth.ensureToken()])
+    const p1 = auth.ensureToken()
+    const p2 = auth.ensureToken()
+    expect(onPrompt).toHaveBeenCalledTimes(1)
+
+    auth.setToken('entered') // user submits the overlay
+    expect(await p1).toBe('entered')
+    expect(await p2).toBe('entered')
+  })
+
+  it('single-flights even when each concurrent request clears the token first (request-wrapper pattern)', async () => {
+    const auth = createAuthManager()
+    const onPrompt = vi.fn()
+    auth.registerPrompt(onPrompt)
+
+    // Two concurrent 401s, each doing what request() does before awaiting a token.
+    auth.clearToken()
+    const p1 = auth.ensureToken()
+    auth.clearToken()
+    const p2 = auth.ensureToken()
 
     expect(onPrompt).toHaveBeenCalledTimes(1)
-    expect(a).toBe('entered')
-    expect(b).toBe('entered')
+
+    auth.setToken('shared')
+    expect(await p1).toBe('shared')
+    expect(await p2).toBe('shared')
+  })
+
+  it('prompts again on a second cycle after a token was set and later cleared', async () => {
+    const auth = createAuthManager()
+    const onPrompt = vi.fn()
+    auth.registerPrompt(onPrompt)
+
+    const p1 = auth.ensureToken()
+    auth.setToken('first')
+    await p1
+    expect(onPrompt).toHaveBeenCalledTimes(1)
+
+    // New 401 cycle.
+    auth.clearToken()
+    const p2 = auth.ensureToken()
+    expect(onPrompt).toHaveBeenCalledTimes(2)
+    auth.setToken('second')
+    expect(await p2).toBe('second')
   })
 
   it('hasFailedAttempt is false on cold start and true after a real token is rejected', () => {

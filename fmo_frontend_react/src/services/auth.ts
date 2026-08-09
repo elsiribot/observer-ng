@@ -53,6 +53,7 @@ export function createAuthManager(): AuthManager {
       if (pendingResolve) {
         const resolve = pendingResolve
         pendingResolve = null
+        pendingPromise = null
         resolve(token)
       }
     },
@@ -64,8 +65,6 @@ export function createAuthManager(): AuthManager {
       // flag a failed attempt if we actually had a token to clear.
       lastAttemptFailed = inMemoryToken !== null
       inMemoryToken = null
-      pendingPromise = null
-      pendingResolve = null
       try {
         window.sessionStorage.removeItem(STORAGE_KEY)
       } catch {
@@ -74,15 +73,18 @@ export function createAuthManager(): AuthManager {
     },
 
     ensureToken(): Promise<string> {
-      // Single-flight: concurrent 401s collapse to one prompt.
+      // Single-flight: concurrent 401s collapse to one prompt. Capture the new
+      // promise in a local so we return a valid promise even if `onPrompt`
+      // resolves synchronously (which nils the module-level `pendingPromise`).
       if (pendingPromise) {
         return pendingPromise
       }
-      pendingPromise = new Promise<string>((resolve) => {
+      const promise = new Promise<string>((resolve) => {
         pendingResolve = resolve
       })
+      pendingPromise = promise
       onPrompt?.()
-      return pendingPromise
+      return promise
     },
 
     registerPrompt(fn: () => void): void {
