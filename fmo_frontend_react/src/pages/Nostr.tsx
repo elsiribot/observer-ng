@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../services/api';
+import { api, authedFetch } from '../services/api';
 import { Copyable } from '../components/Copyable';
 
 interface NostrFederation {
@@ -69,9 +69,7 @@ export function Nostr() {
 
     try {
       // Fetch federation config
-      const configResponse = await fetch(
-        `${import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api'}/config/${inviteCodeToCheck}`
-      );
+      const configResponse = await authedFetch(`/config/${inviteCodeToCheck}`);
 
       if (!configResponse.ok) {
         throw new Error('Failed to fetch federation config');
@@ -80,9 +78,7 @@ export function Nostr() {
       const config = await configResponse.json();
 
       // Fetch federation metadata
-      const metaResponse = await fetch(
-        `${import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api'}/config/${inviteCodeToCheck}/meta`
-      );
+      const metaResponse = await authedFetch(`/config/${inviteCodeToCheck}/meta`);
 
       let name = 'Unknown';
       if (metaResponse.ok) {
@@ -169,12 +165,10 @@ export function Nostr() {
         const federationsWithoutNames = nostrFeds.filter(fed => !fed.name);
 
         if (federationsWithoutNames.length > 0) {
-          const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-
           // Fetch names for federations without them (in background, non-blocking)
           federationsWithoutNames.forEach(async (fed) => {
             try {
-              const metaResponse = await fetch(`${BASE_URL}/config/${fed.invite}/meta`, {
+              const metaResponse = await authedFetch(`/config/${fed.invite}/meta`, {
                 signal: AbortSignal.timeout(5000), // 5 second timeout
               });
               if (metaResponse.ok) {
@@ -257,16 +251,13 @@ export function Nostr() {
       const signedEvent = await window.nostr.signEvent(unsignedEvent);
 
       // Publish to backend
-      const response = await fetch(
-        `${import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api'}/nostr/federations`,
-        {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(signedEvent),
-        }
-      );
+      const response = await authedFetch(`/nostr/federations`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(signedEvent),
+      });
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -289,9 +280,7 @@ export function Nostr() {
     try {
       // Use the API endpoint to calculate the federation ID from the invite code
       // since calculating it client-side would require crypto libraries
-      const response = await fetch(
-        `${import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api'}/config/${inviteCode}/id`
-      );
+      const response = await authedFetch(`/config/${inviteCode}/id`);
 
       if (!response.ok) {
         throw new Error('Failed to fetch federation ID');

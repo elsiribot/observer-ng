@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo, lazy, Suspense } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
-import { api } from '../services/api';
+import { api, authedFetch } from '../services/api';
 import type { FederationSummary } from '../types/api';
 import { Badge } from '../components/Badge';
 import { Alert } from '../components/Alert';
@@ -200,8 +200,7 @@ export function FederationDetail() {
 
   const fetchGuardianHealth = async (federationId: string) => {
     try {
-  const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-      const response = await fetch(`${BASE_URL}/federations/${federationId}/health`);
+      const response = await authedFetch(`/federations/${federationId}/health`);
       if (response.ok) {
         const data = await response.json();
         setGuardianHealth(data);
@@ -214,8 +213,7 @@ export function FederationDetail() {
   const fetchHistogram = async (federationId: string) => {
     setHistogramLoading(true);
     try {
-  const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-      const response = await fetch(`${BASE_URL}/federations/${federationId}/transactions/histogram`);
+      const response = await authedFetch(`/federations/${federationId}/transactions/histogram`);
       if (response.ok) {
         const data = await response.json() as Record<string, { num_transactions: number; amount_transferred: number }>;
         // Data comes as: { "2024-05-31": { "num_transactions": 1, "amount_transferred": 2000000000 }, ... }
@@ -241,8 +239,7 @@ export function FederationDetail() {
   const fetchUTXOs = async (federationId: string) => {
     setUtxosLoading(true);
     try {
-  const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-      const response = await fetch(`${BASE_URL}/federations/${federationId}/utxos`);
+      const response = await authedFetch(`/federations/${federationId}/utxos`);
       if (response.ok) {
         const data = await response.json();
         setUtxos(data);
@@ -287,8 +284,7 @@ export function FederationDetail() {
       const signedEvent = await nostr.signEvent(unsignedEvent);
 
       // Publish to backend
-  const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-      const response = await fetch(`${BASE_URL}/federations/nostr/rating`, {
+      const response = await authedFetch(`/federations/nostr/rating`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -732,11 +728,9 @@ export function FederationDetail() {
 }
 
 async function fetchFederationConfig(federationId: string, inviteCode: string): Promise<FederationConfig> {
-  const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
-
   // Try fetching config using federation ID first (works for actively observed federations)
   try {
-    const configResponse = await fetch(`${BASE_URL}/federations/${federationId}/config`);
+    const configResponse = await authedFetch(`/federations/${federationId}/config`);
     if (configResponse.ok) {
       const config = await configResponse.json();
       return parseConfig(config);
@@ -746,7 +740,7 @@ async function fetchFederationConfig(federationId: string, inviteCode: string): 
   }
 
   // Fallback: fetch config using invite code (works for any federation with valid invite)
-  const configResponse = await fetch(`${BASE_URL}/config/${inviteCode}`);
+  const configResponse = await authedFetch(`/config/${inviteCode}`);
   if (!configResponse.ok) {
     throw new Error(`Failed to fetch federation config: ${configResponse.status}`);
   }
