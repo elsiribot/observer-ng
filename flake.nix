@@ -140,6 +140,7 @@
             };
 
             fmo_frontend_react_default = fmo_frontend_react "http://localhost:3000/api";
+            fmo_frontend_react_relative = fmo_frontend_react "/api";
           };
       in
       {
