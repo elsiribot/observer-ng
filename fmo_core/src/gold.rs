@@ -4,12 +4,12 @@
 //!
 //! Two classifiers feed `fold_sessions`, the single entry point both the
 //! background processor and tests call:
-//! - `fold_standalone`: peg-in / peg-out / ecash transfer / stability pool
-//!   (v1 and v2 analogues), by input/output kind signature, with the exact
-//!   fedimint fee `Σinputs − Σoutputs`. One row per non-LN-leg txid.
+//! - `fold_standalone`: peg-in / peg-out / ecash transfer / stability pool (v1
+//!   and v2 analogues), by input/output kind signature, with the exact fedimint
+//!   fee `Σinputs − Σoutputs`. One row per non-LN-leg txid.
 //! - `fold_ln`: LN/LNv2 payments, folding every leg of a contract's lifecycle
-//!   (offer/fund/claim/cancel/refund, possibly spanning many sessions) into
-//!   one `user_transactions` row keyed by `contract_id`, with a
+//!   (offer/fund/claim/cancel/refund, possibly spanning many sessions) into one
+//!   `user_transactions` row keyed by `contract_id`, with a
 //!   `user_transaction_txs` membership row per leg.
 //!
 //! Both a federation's LN module and its LNv2 module are optional (a given
@@ -31,10 +31,7 @@ use crate::observer::FederationObserver;
 /// installed, instead of erroring on a missing relation.
 async fn table_exists(dbtx: &Transaction<'_>, qualified_name: &str) -> anyhow::Result<bool> {
     Ok(dbtx
-        .query_one(
-            "SELECT to_regclass($1) IS NOT NULL",
-            &[&qualified_name],
-        )
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&qualified_name])
         .await?
         .get(0))
 }
@@ -191,7 +188,12 @@ pub async fn fold_ln(
     Ok(())
 }
 
-async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> anyhow::Result<()> {
+async fn fold_ln_v1(
+    dbtx: &Transaction<'_>,
+    fed: &[u8],
+    start: i32,
+    end: i32,
+) -> anyhow::Result<()> {
     let query = format!(
         "INSERT INTO user_transactions (federation_id, user_tx_key, kind, direction, amount_msat,
             fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp, status)
@@ -245,7 +247,7 @@ async fn fold_ln_v1(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) ->
 
     // Only emit membership rows for contracts that produced a parent
     // `user_transactions` row (i.e. funded contracts). An offer-only,
-    // unfunded invoice moves no value and is INNER-JOINed out of the upsert
+    // unfunded invoice moves no value and is inner-joined out of the upsert
     // above, so it has no parent — inserting a membership row for it would
     // violate the FK and stall the whole federation's gold processor.
     let query = format!(

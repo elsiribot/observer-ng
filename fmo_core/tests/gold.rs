@@ -90,7 +90,12 @@ async fn create_ln_schemas(pool: &deadpool_postgres::Pool) {
 /// Inserts a bare transaction row (no inputs/outputs) — used for offer legs,
 /// which don't necessarily spend/create anything gold cares about beyond the
 /// `fmo_ln.output_contracts` row.
-async fn insert_bare_tx(pool: &deadpool_postgres::Pool, fed: &[u8], txid: &[u8], session_index: i32) {
+async fn insert_bare_tx(
+    pool: &deadpool_postgres::Pool,
+    fed: &[u8],
+    txid: &[u8],
+    session_index: i32,
+) {
     pool.get()
         .await
         .unwrap()
@@ -173,10 +178,11 @@ async fn insert_ln_fund_output_with_gateway_key(
 
 /// Inserts an `fmo_ln.gateways` row with a `raw` blob shaped like the real
 /// gateway poller's stored JSON (confirmed against production 2026-08-07):
-/// `{"info":{"gateway_redeem_key":"...","fees":{"base_msat":...,"proportional_millionths":...}}}`.
-/// `gateway_redeem_key` — NOT `gateway_id`/`node_pub_key` — is the column
-/// `OutgoingContract.gateway_key` matches (verified live: 0/128 matched
-/// `gateway_id`/`node_pub_key`, 117/128 matched `raw->info->gateway_redeem_key`).
+/// `{"info":{"gateway_redeem_key":"...","fees":{"base_msat":...,"
+/// proportional_millionths":...}}}`. `gateway_redeem_key` — NOT
+/// `gateway_id`/`node_pub_key` — is the column `OutgoingContract.gateway_key`
+/// matches (verified live: 0/128 matched `gateway_id`/`node_pub_key`, 117/128
+/// matched `raw->info->gateway_redeem_key`).
 async fn insert_ln_gateway(
     pool: &deadpool_postgres::Pool,
     fed: &[u8],
@@ -204,7 +210,12 @@ async fn insert_ln_gateway(
         .unwrap();
 }
 
-async fn insert_ln_contract(pool: &deadpool_postgres::Pool, fed: &[u8], contract_id: &[u8], typ: &str) {
+async fn insert_ln_contract(
+    pool: &deadpool_postgres::Pool,
+    fed: &[u8],
+    contract_id: &[u8],
+    typ: &str,
+) {
     pool.get()
         .await
         .unwrap()
@@ -527,15 +538,38 @@ async fn fold_standalone_classifies_walletv2_pegs() {
 
     // peg-in v2: walletv2 INPUT funds a mintv2 output, in=100k out=99k -> fee 1000
     let peg_in_txid = vec![0x21u8; 32];
-    insert_tx(&pool, &fed, &peg_in_txid, 1, "walletv2", 100_000, "mintv2", 99_000).await;
-    // peg-out v2: mintv2 input redeemed for a walletv2 OUTPUT, in=50k out=49k -> fee 1000
+    insert_tx(
+        &pool,
+        &fed,
+        &peg_in_txid,
+        1,
+        "walletv2",
+        100_000,
+        "mintv2",
+        99_000,
+    )
+    .await;
+    // peg-out v2: mintv2 input redeemed for a walletv2 OUTPUT, in=50k out=49k ->
+    // fee 1000
     let peg_out_txid = vec![0x22u8; 32];
-    insert_tx(&pool, &fed, &peg_out_txid, 1, "mintv2", 50_000, "walletv2", 49_000).await;
+    insert_tx(
+        &pool,
+        &fed,
+        &peg_out_txid,
+        1,
+        "mintv2",
+        50_000,
+        "walletv2",
+        49_000,
+    )
+    .await;
 
     {
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
         dbtx.commit().await.unwrap();
     }
 
@@ -599,13 +633,25 @@ async fn heal_gold_backfills_timestamp_and_populates_daily() {
 
     insert_session(&pool, &fed, 1).await;
     let peg_in_txid = vec![0x31u8; 32];
-    insert_tx(&pool, &fed, &peg_in_txid, 1, "wallet", 100_000, "mint", 99_000).await;
+    insert_tx(
+        &pool,
+        &fed,
+        &peg_in_txid,
+        1,
+        "wallet",
+        100_000,
+        "mint",
+        99_000,
+    )
+    .await;
 
     // Fold BEFORE any session_time vote exists.
     {
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
         dbtx.commit().await.unwrap();
     }
 
@@ -618,17 +664,26 @@ async fn heal_gold_backfills_timestamp_and_populates_daily() {
         .await
         .unwrap()
         .get(0);
-    assert!(ts_before.is_none(), "first_timestamp must be NULL before the vote exists");
+    assert!(
+        ts_before.is_none(),
+        "first_timestamp must be NULL before the vote exists"
+    );
 
     conn.batch_execute("REFRESH MATERIALIZED VIEW user_tx_daily")
         .await
         .unwrap();
     let daily_before: i64 = conn
-        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(daily_before, 0, "timestamp-less row must be absent from user_tx_daily");
+    assert_eq!(
+        daily_before, 0,
+        "timestamp-less row must be absent from user_tx_daily"
+    );
     drop(conn);
 
     // Simulate a refresh cycle: vote arrives, session_times refreshes, heal runs.
@@ -653,17 +708,26 @@ async fn heal_gold_backfills_timestamp_and_populates_daily() {
         .await
         .unwrap()
         .get(0);
-    assert!(ts_after.is_some(), "heal must backfill first_timestamp from session_times");
+    assert!(
+        ts_after.is_some(),
+        "heal must backfill first_timestamp from session_times"
+    );
 
     conn.batch_execute("REFRESH MATERIALIZED VIEW user_tx_daily")
         .await
         .unwrap();
     let daily_after: i64 = conn
-        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(daily_after, 1, "healed row must now appear in user_tx_daily");
+    assert_eq!(
+        daily_after, 1,
+        "healed row must now appear in user_tx_daily"
+    );
 }
 
 /// I3 regression: a walletv2 peg-in's amount comes from balance inference
@@ -735,7 +799,9 @@ async fn heal_gold_backfills_walletv2_pegin_amount_after_inference() {
     {
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2).await.unwrap();
+        fmo_core::gold::fold_sessions(&dbtx, &fed, 0, 2)
+            .await
+            .unwrap();
         dbtx.commit().await.unwrap();
     }
 
@@ -751,10 +817,15 @@ async fn heal_gold_backfills_walletv2_pegin_amount_after_inference() {
     assert_eq!(row.get::<_, String>("kind"), "peg_in_v2");
     assert_eq!(row.get::<_, String>("direction"), "in");
     let amt_before: Option<i64> = row.get("amount_msat");
-    assert!(amt_before.is_none(), "amount must be NULL before inference fills the input");
+    assert!(
+        amt_before.is_none(),
+        "amount must be NULL before inference fills the input"
+    );
 
     // Refresh cycle: inference fills the input amount, then heal backfills gold.
-    let (inputs, _outputs) = fmo_core::amounts::infer_missing_amounts(&conn).await.unwrap();
+    let (inputs, _outputs) = fmo_core::amounts::infer_missing_amounts(&conn)
+        .await
+        .unwrap();
     assert_eq!(inputs, 1, "inference must fill the one NULL walletv2 input");
     fmo_core::gold::heal_gold(&conn).await.unwrap();
 
@@ -993,22 +1064,22 @@ async fn fold_ln_without_claim_is_in_flight() {
 /// scoping is correct on the two axes that matter:
 ///
 /// - Contract A is touched by the SECOND batch (`[3,4)`) only via its claim
-///   leg; its fund leg was ingested and folded in an EARLIER batch
-///   (`[1,3)`), so it lives in `fmo_ln.output_contracts` at session 1, well
-///   outside `[3,4)`. `LN_TOUCHED_CONTRACTS` matches contracts by
-///   `(federation_id, contract_id)`, not by session, so the scoped
-///   `funds`/`legs` subqueries must still pick up A's session-1 fund leg to
-///   compute the right amount/status/`num_fedimint_txs` — proving the fix
-///   preserves "full lifecycle of touched contracts", not "full lifecycle of
-///   ALL contracts" (the bug) and not "only this batch's session range" (a
-///   different, equally wrong, fix).
-/// - Contract B is a fully independent, already-completed contract whose
-///   legs are entirely within the FIRST batch's range (`[1,3)`) — it has no
-///   leg in `[3,4)`, so it must be absent from `LN_TOUCHED_CONTRACTS` for the
-///   second batch and must come out of that batch byte-for-byte unchanged
-///   (not recreated, not updated). A and B are funded for different amounts,
-///   so any cross-contract contamination in the scoped subqueries would show
-///   up as a wrong amount on one of them.
+///   leg; its fund leg was ingested and folded in an EARLIER batch (`[1,3)`),
+///   so it lives in `fmo_ln.output_contracts` at session 1, well outside
+///   `[3,4)`. `LN_TOUCHED_CONTRACTS` matches contracts by `(federation_id,
+///   contract_id)`, not by session, so the scoped `funds`/`legs` subqueries
+///   must still pick up A's session-1 fund leg to compute the right
+///   amount/status/`num_fedimint_txs` — proving the fix preserves "full
+///   lifecycle of touched contracts", not "full lifecycle of ALL contracts"
+///   (the bug) and not "only this batch's session range" (a different, equally
+///   wrong, fix).
+/// - Contract B is a fully independent, already-completed contract whose legs
+///   are entirely within the FIRST batch's range (`[1,3)`) — it has no leg in
+///   `[3,4)`, so it must be absent from `LN_TOUCHED_CONTRACTS` for the second
+///   batch and must come out of that batch byte-for-byte unchanged (not
+///   recreated, not updated). A and B are funded for different amounts, so any
+///   cross-contract contamination in the scoped subqueries would show up as a
+///   wrong amount on one of them.
 #[tokio::test]
 async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
     let _guard = DB_LOCK.lock().await;
@@ -1322,7 +1393,10 @@ async fn fold_ln_offer_only_unfunded_invoice_produces_nothing() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(membership_count, 0, "no orphan membership rows for an unfunded offer");
+    assert_eq!(
+        membership_count, 0,
+        "no orphan membership rows for an unfunded offer"
+    );
 }
 
 /// `gateway_fee_estimate_msat` for outgoing LN sends: the gateway fee isn't
@@ -1370,15 +1444,8 @@ async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
     insert_ln_contract(&pool, &fed, &send_contract_id, "outgoing").await;
     insert_bare_tx(&pool, &fed, &send_fund_txid, 1).await;
     insert_tx_input(&pool, &fed, &send_fund_txid, 0, "mint", 10_520).await;
-    insert_ln_fund_output_with_gateway_key(
-        &pool,
-        &fed,
-        &send_fund_txid,
-        0,
-        10_520,
-        gateway_key,
-    )
-    .await;
+    insert_ln_fund_output_with_gateway_key(&pool, &fed, &send_fund_txid, 0, 10_520, gateway_key)
+        .await;
     insert_ln_output_contract(&pool, &fed, &send_fund_txid, 0, "fund", &send_contract_id).await;
 
     // incoming (ln_receive) contract — no gateway fee applies
@@ -1429,7 +1496,10 @@ async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(recv_fee, None, "ln_receive must not get a gateway fee estimate");
+    assert_eq!(
+        recv_fee, None,
+        "ln_receive must not get a gateway fee estimate"
+    );
 
     let peg_in_fee: Option<i64> = conn
         .query_one(
@@ -1440,7 +1510,10 @@ async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(peg_in_fee, None, "non-LN rows must not get a gateway fee estimate");
+    assert_eq!(
+        peg_in_fee, None,
+        "non-LN rows must not get a gateway fee estimate"
+    );
     drop(conn);
 
     // idempotent: re-running changes nothing
@@ -1469,8 +1542,9 @@ async fn fold_ln_estimates_gateway_fee_for_outgoing_send() {
 /// larger than an old contract's gross amount (3000). Naively inverting the
 /// fee would give `invoice = (3000-5000)/(1+ppm) < 0` and an estimated "fee"
 /// of ~4990 msat — larger than the whole contract, a nonsense
-/// fee-transparency number. The estimator must leave `gateway_fee_estimate_msat`
-/// NULL (unknown), never a negative or >contract value, and must not error.
+/// fee-transparency number. The estimator must leave
+/// `gateway_fee_estimate_msat` NULL (unknown), never a negative or >contract
+/// value, and must not error.
 #[tokio::test]
 async fn fold_ln_leaves_gateway_fee_null_on_schedule_drift() {
     let _guard = DB_LOCK.lock().await;
@@ -1590,7 +1664,10 @@ async fn user_tx_daily_rolls_up_after_refresh() {
     let peg_in_2 = vec![11u8; 32];
     let peg_out = vec![12u8; 32];
     insert_tx(&pool, &fed, &peg_in_1, 1, "wallet", 100_000, "mint", 99_000).await;
-    insert_tx(&pool, &fed, &peg_in_2, 1, "wallet", 200_000, "mint", 198_000).await;
+    insert_tx(
+        &pool, &fed, &peg_in_2, 1, "wallet", 200_000, "mint", 198_000,
+    )
+    .await;
     insert_tx(&pool, &fed, &peg_out, 1, "mint", 50_000, "wallet", 49_000).await;
 
     {
@@ -1617,7 +1694,10 @@ async fn user_tx_daily_rolls_up_after_refresh() {
 
     // Red: the matview is not auto-refreshed, so it must still be empty.
     let daily_count_before: i64 = conn
-        .query_one("SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1", &[&fed])
+        .query_one(
+            "SELECT COUNT(*) FROM user_tx_daily WHERE federation_id = $1",
+            &[&fed],
+        )
         .await
         .unwrap()
         .get(0);

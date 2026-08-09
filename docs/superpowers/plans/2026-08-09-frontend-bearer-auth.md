@@ -29,12 +29,12 @@ The flakebox pre-commit hook (`$(git rev-parse --git-common-dir)/hooks/pre-commi
 - Modify: `fmo_core/src/gold.rs` (one comment reword + rustfmt)
 - Modify: `fmo_core/tests/gold.rs` (rustfmt only)
 
-- [ ] **Step 1: Fix the typo** — reword the comment so `typos` stops parsing `INNER-JOINed` as the misspelling `Ned`. Lowercasing it to `inner-joined` (a valid word) is the minimal fix.
+- [ ] **Step 1: Fix the typo** — reword the comment to lowercase `inner-joined` so typos stops flagging it. This is a valid word and the minimal fix.
 
 In `fmo_core/src/gold.rs` (currently line 248), change:
 
 ```rust
-    // unfunded invoice moves no value and is INNER-JOINed out of the upsert
+    // unfunded invoice moves no value and is inner-joined out of the upsert
 ```
 
 to:
@@ -46,7 +46,7 @@ to:
 - [ ] **Step 2: Verify typos is clean**
 
 Run: `nix develop -c just typos`
-Expected: no `error:` lines (the `Ned` error is gone). The recipe may print a harmless `line 124: return: can only 'return'...` trailer — that is a known flakebox quirk, not a failure.
+Expected: no `error:` lines (typos should pass). The recipe may print a harmless `line 124: return: can only 'return'...` trailer — that is a known flakebox quirk, not a failure.
 
 - [ ] **Step 3: Apply rustfmt across the workspace**
 
