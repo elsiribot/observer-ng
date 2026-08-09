@@ -1,41 +1,46 @@
 import type { FedimintTotals, FederationSummary } from '../types/api';
+import { auth } from './auth';
 
 const BASE_URL = import.meta.env.VITE_FMO_API_BASE_URL || 'https://observer.fedimint.org/api';
 
+function withAuth(opts: RequestInit, token: string | null): RequestInit {
+  if (!token) {
+    return opts;
+  }
+  return {
+    ...opts,
+    headers: { ...(opts.headers ?? {}), Authorization: `Bearer ${token}` },
+  };
+}
+
+// Wraps fetch with bearer auth. On 401 it clears the (stale/wrong) token,
+// asks the auth manager for a fresh one (single-flight overlay), and retries.
+// On a server that never returns 401 the loop is never entered, so the public
+// unauthenticated instance behaves exactly as before.
+async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  let res = await fetch(`${BASE_URL}${path}`, withAuth(opts, auth.getToken()));
+  while (res.status === 401) {
+    auth.clearToken();
+    const token = await auth.ensureToken();
+    res = await fetch(`${BASE_URL}${path}`, withAuth(opts, token));
+  }
+  if (!res.ok) {
+    throw new Error(`Request to ${path} failed with status ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export const api = {
-  async getTotals(): Promise<FedimintTotals> {
-    const response = await fetch(`${BASE_URL}/federations/totals`);
-    if (!response.ok) {
-      throw new Error('Failed to fetch totals');
-    }
-    return response.json();
-  },
+  getTotals: () => request<FedimintTotals>('/federations/totals'),
 
-  async getFederations(): Promise<FederationSummary[]> {
-    const response = await fetch(`${BASE_URL}/federations`);
-    if (!response.ok) {
-      throw new Error('Failed to fetch federations');
-    }
-    return response.json();
-  },
+  getFederations: () => request<FederationSummary[]>('/federations'),
 
-  async getNostrFederations(): Promise<Record<string, string>> {
-    const response = await fetch(`${BASE_URL}/nostr/federations`);
-    if (!response.ok) {
-      throw new Error('Failed to fetch nostr federations');
-    }
-    return response.json();
-  },
+  getNostrFederations: () => request<Record<string, string>>('/nostr/federations'),
 
   async getFederation(id: string): Promise<FederationSummary> {
-    const response = await fetch(`${BASE_URL}/federations/${id}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch federation ${id}`);
-    }
-    // The backend returns overview data, but we need full summary
-    // So we still fetch from the list and find it
-    // TODO: Backend should provide a full federation detail endpoint
-    const allFederations = await this.getFederations();
+    // The backend has no full per-federation summary endpoint yet, so we fetch
+    // the list and find it (unchanged behavior, now authenticated).
+    const allFederations = await request<FederationSummary[]>('/federations');
     const federation = allFederations.find(f => f.id === id);
     if (!federation) {
       throw new Error(`Federation ${id} not found`);
@@ -43,35 +48,17 @@ export const api = {
     return federation;
   },
 
-  async getFederationConfig(id: string): Promise<Record<string, unknown>> {
-    const response = await fetch(`${BASE_URL}/federations/${id}/config`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch config for federation ${id}`);
-    }
-    return response.json();
-  },
+  getFederationConfig: (id: string) =>
+    request<Record<string, unknown>>(`/federations/${id}/config`),
 
-  async getFederationUtxos(id: string): Promise<unknown[]> {
-    const response = await fetch(`${BASE_URL}/federations/${id}/utxos`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch UTXOs for federation ${id}`);
-    }
-    return response.json();
-  },
+  getFederationUtxos: (id: string) =>
+    request<unknown[]>(`/federations/${id}/utxos`),
 
-  async getFederationHistogram(id: string): Promise<Record<string, { num_transactions: number; amount_transferred: number }>> {
-    const response = await fetch(`${BASE_URL}/federations/${id}/transactions/histogram`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch histogram for federation ${id}`);
-    }
-    return response.json();
-  },
+  getFederationHistogram: (id: string) =>
+    request<Record<string, { num_transactions: number; amount_transferred: number }>>(
+      `/federations/${id}/transactions/histogram`,
+    ),
 
-  async getFederationHealth(id: string): Promise<Record<string, unknown>> {
-    const response = await fetch(`${BASE_URL}/federations/${id}/health`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch health for federation ${id}`);
-    }
-    return response.json();
-  },
+  getFederationHealth: (id: string) =>
+    request<Record<string, unknown>>(`/federations/${id}/health`),
 };
