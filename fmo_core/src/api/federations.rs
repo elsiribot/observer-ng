@@ -54,6 +54,10 @@ pub fn get_federations_routes() -> Router<AppState> {
             "/:federation_id/sessions/count",
             get(super::sessions::count_sessions),
         )
+        .route(
+            "/:federation_id/sessions/:session_index",
+            get(super::sessions::session_items),
+        )
         .route("/:federation_id/backfill", post(backfill_federation))
 }
 

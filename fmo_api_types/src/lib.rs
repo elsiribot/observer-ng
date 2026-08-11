@@ -127,3 +127,30 @@ pub struct GatewayUptimeMetrics {
     pub offline_minutes: u64,
     pub uptime_pct: f64,
 }
+
+/// One row of the session list: precomputed counts from `session_stats` plus
+/// the estimated wall-clock time from `session_times`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_index: i64,
+    pub estimated_time: Option<i64>,
+    pub tx_count: i64,
+    pub items_by_kind: serde_json::Value,
+}
+
+/// One item (a transaction or a consensus item) within a session's ordered
+/// item list. `session_index` is always populated: redundant in the
+/// session-scope detail view, but needed when this same type is reused for a
+/// federation-wide item stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionItem {
+    pub session_index: i64,
+    pub item_index: i64,
+    /// "transaction" | "ci"
+    pub item_type: String,
+    pub kind: Option<String>,
+    pub peer_id: Option<i32>,
+    pub txid: Option<String>,
+    pub user_tx_key: Option<String>,
+    pub details: Option<serde_json::Value>,
+}

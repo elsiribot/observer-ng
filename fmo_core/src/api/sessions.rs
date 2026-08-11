@@ -1,33 +1,37 @@
-use std::collections::BTreeMap;
-
 use anyhow::Context;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use fedimint_core::config::FederationId;
 use fedimint_core::encoding::Encodable;
+use fmo_api_types::{SessionItem, SessionSummary};
 use postgres_from_row::FromRow;
-use serde_json::json;
+use serde::Deserialize;
 
 use crate::api::AppState;
 use crate::observer::FederationObserver;
 use crate::query::{query, query_value};
 
+#[derive(Debug, Deserialize)]
+pub(super) struct SessionPageParams {
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+const DEFAULT_SESSION_PAGE_LIMIT: i64 = 50;
+
 pub(super) async fn list_sessions(
     Path(federation_id): Path<FederationId>,
+    Query(params): Query<SessionPageParams>,
     State(state): State<AppState>,
-) -> crate::error::Result<Json<BTreeMap<i64, serde_json::Value>>> {
+) -> crate::error::Result<Json<Vec<SessionSummary>>> {
     Ok(state
         .observer
-        .federation_session_list(federation_id)
+        .federation_session_page(
+            federation_id,
+            params.before,
+            params.limit.unwrap_or(DEFAULT_SESSION_PAGE_LIMIT),
+        )
         .await?
-        .into_iter()
-        .map(|session| {
-            (
-                session.session_index,
-                json!({ "transactions": session.transaction_count }),
-            )
-        })
-        .collect::<BTreeMap<_, _>>()
         .into())
 }
 
@@ -42,30 +46,80 @@ pub(super) async fn count_sessions(
         .into())
 }
 
+pub(super) async fn session_items(
+    Path((federation_id, session_index)): Path<(FederationId, i64)>,
+    State(state): State<AppState>,
+) -> crate::error::Result<Json<Vec<SessionItem>>> {
+    Ok(state
+        .observer
+        .federation_session_items(federation_id, session_index)
+        .await?
+        .into())
+}
+
 #[derive(FromRow)]
-pub struct SessionData {
-    pub session_index: i64,
-    pub transaction_count: i64,
+struct SessionSummaryRow {
+    session_index: i64,
+    estimated_time: Option<i64>,
+    tx_count: i64,
+    items_by_kind: serde_json::Value,
+}
+
+impl From<SessionSummaryRow> for SessionSummary {
+    fn from(row: SessionSummaryRow) -> Self {
+        SessionSummary {
+            session_index: row.session_index,
+            estimated_time: row.estimated_time,
+            tx_count: row.tx_count,
+            items_by_kind: row.items_by_kind,
+        }
+    }
+}
+
+#[derive(FromRow)]
+struct SessionItemRow {
+    item_index: i64,
+    item_type: String,
+    kind: Option<String>,
+    peer_id: Option<i32>,
+    txid: Option<String>,
+    user_tx_key: Option<String>,
+    details: Option<serde_json::Value>,
 }
 
 impl FederationObserver {
-    pub async fn federation_session_list(
+    /// Keyset-paginated session list, newest first, backed by the
+    /// precomputed `session_stats` table (no counting at request time).
+    pub async fn federation_session_page(
         &self,
         federation_id: FederationId,
-    ) -> anyhow::Result<Vec<SessionData>> {
+        before: Option<i64>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<SessionSummary>> {
         self.get_federation(federation_id)
             .await
             .context("Federation doesn't exist")?;
 
-        query::<SessionData>(&self.connection().await?, "
-            SELECT s.session_index, COUNT(t.txid) AS transaction_count
-            FROM sessions AS s
-            LEFT JOIN transactions AS t ON s.federation_id = t.federation_id AND s.session_index = t.session_index
-            WHERE s.federation_id = $1
-            GROUP BY s.session_index
-            ORDER BY s.session_index ASC
-        ", &[&federation_id.consensus_encode_to_vec()])
-        .await
+        // language=postgresql
+        const QUERY: &str = "
+            SELECT ss.session_index::bigint, EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                   ss.tx_count::bigint, ss.items_by_kind
+            FROM session_stats ss
+            LEFT JOIN session_times st ON st.federation_id = ss.federation_id AND st.session_index = ss.session_index
+            WHERE ss.federation_id = $1 AND ($2::int IS NULL OR ss.session_index < $2)
+            ORDER BY ss.session_index DESC
+            LIMIT $3
+        ";
+
+        let before = before.map(|b| b as i32);
+        let rows = query::<SessionSummaryRow>(
+            &self.connection().await?,
+            QUERY,
+            &[&federation_id.consensus_encode_to_vec(), &before, &limit],
+        )
+        .await?;
+
+        Ok(rows.into_iter().map(SessionSummary::from).collect())
     }
 
     pub async fn federation_session_count(
@@ -79,5 +133,55 @@ impl FederationObserver {
                 &[&federation_id.consensus_encode_to_vec()]
             ).await?;
         Ok(session_count as u64)
+    }
+
+    /// Full ordered item list (transactions ⊔ consensus items) of one
+    /// session.
+    pub async fn federation_session_items(
+        &self,
+        federation_id: FederationId,
+        session_index: i64,
+    ) -> anyhow::Result<Vec<SessionItem>> {
+        self.get_federation(federation_id)
+            .await
+            .context("Federation doesn't exist")?;
+
+        // language=postgresql
+        const QUERY: &str = "
+            SELECT t.item_index::bigint, 'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
+                   encode(t.txid,'hex') AS txid,
+                   (SELECT encode(utt.user_tx_key,'hex') FROM user_transaction_txs utt
+                    WHERE utt.federation_id=t.federation_id AND utt.txid=t.txid LIMIT 1) AS user_tx_key,
+                   NULL::jsonb AS details
+            FROM transactions t WHERE t.federation_id=$1 AND t.session_index=$2
+            UNION ALL
+            SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL, ci.details
+            FROM consensus_items ci WHERE ci.federation_id=$1 AND ci.session_index=$2
+            ORDER BY 1
+        ";
+
+        let rows = query::<SessionItemRow>(
+            &self.connection().await?,
+            QUERY,
+            &[
+                &federation_id.consensus_encode_to_vec(),
+                &(session_index as i32),
+            ],
+        )
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| SessionItem {
+                session_index,
+                item_index: row.item_index,
+                item_type: row.item_type,
+                kind: row.kind,
+                peer_id: row.peer_id,
+                txid: row.txid,
+                user_tx_key: row.user_tx_key,
+                details: row.details,
+            })
+            .collect())
     }
 }
