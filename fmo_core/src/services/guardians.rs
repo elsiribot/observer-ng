@@ -37,13 +37,18 @@ impl FederationObserver {
             .collect();
         let api = DynGlobalApi::new(self.connectors().clone(), peers, None)?;
 
+        // The v1 wallet module's `block_count_local` endpoint doubles as a warm
+        // per-peer latency probe and a bitcoin block-height source. Federations
+        // without a v1 wallet module (e.g. walletv2-only ones like pure-v2
+        // federations) simply don't report a block height — we still measure
+        // latency via a second status request rather than failing the whole
+        // monitor, which would leave those federations with no health data at all.
         let wallet_module = config
             .modules
             .iter()
             .find_map(|(&module_instance_id, module)| {
                 (module.kind.as_str() == "wallet").then_some(module_instance_id)
-            })
-            .context("Wallet module not found")?;
+            });
 
         loop {
             interval.tick().await;
@@ -64,26 +69,38 @@ impl FederationObserver {
                             .ok()
                             .and_then(|json| serde_json::from_value::<StatusResponse>(json).ok());
 
-                        // Second request is used to determine ping
+                        // Second request is used to determine ping (warm).
                         // TODO: how much time does bitcoind take to answer if at all (caching?)?
                         let start_time = Instant::now();
-                        let block_height = api
-                            .with_module(wallet_module)
-                            .request_single_peer(
-                                BLOCK_COUNT_LOCAL_ENDPOINT.to_owned(),
-                                ApiRequestErased::default(),
-                                peer_id,
-                            )
-                            .await
-                            .ok()
-                            .and_then(|json| {
-                                serde_json::from_value::<Option<u32>>(json).ok().flatten()
-                            })
-                            .map(|block_count| {
-                                // Fedimint uses 1-based block heights, while bitcoind uses 0-based
-                                // heights
-                                block_count - 1
-                            });
+                        let block_height = if let Some(wallet_module) = wallet_module {
+                            api.with_module(wallet_module)
+                                .request_single_peer(
+                                    BLOCK_COUNT_LOCAL_ENDPOINT.to_owned(),
+                                    ApiRequestErased::default(),
+                                    peer_id,
+                                )
+                                .await
+                                .ok()
+                                .and_then(|json| {
+                                    serde_json::from_value::<Option<u32>>(json).ok().flatten()
+                                })
+                                .map(|block_count| {
+                                    // Fedimint uses 1-based block heights, while bitcoind uses
+                                    // 0-based heights
+                                    block_count - 1
+                                })
+                        } else {
+                            // No v1 wallet module (e.g. walletv2-only federation): time a second
+                            // status request for latency; block height is unavailable here.
+                            let _ = api
+                                .request_single_peer::<serde_json::Value>(
+                                    STATUS_ENDPOINT.to_owned(),
+                                    ApiRequestErased::default(),
+                                    peer_id,
+                                )
+                                .await;
+                            None
+                        };
                         let api_latency = start_time.elapsed();
 
                         (peer_id, status, block_height, api_latency)
