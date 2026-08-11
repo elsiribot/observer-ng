@@ -47,6 +47,14 @@ pub fn get_federations_routes() -> Router<AppState> {
             get(super::transactions::transaction_histogram),
         )
         .route(
+            "/:federation_id/tx/:txid",
+            get(super::transactions::transaction_detail),
+        )
+        .route(
+            "/:federation_id/user-transactions/:user_tx_key",
+            get(super::user_transactions::user_transaction_detail),
+        )
+        .route(
             "/:federation_id/sessions",
             get(super::sessions::list_sessions),
         )

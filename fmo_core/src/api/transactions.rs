@@ -9,14 +9,14 @@ use fedimint_core::config::FederationId;
 use fedimint_core::core::{DynInput, DynOutput, DynUnknown};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::{Amount, TransactionId};
-use fmo_api_types::FederationActivity;
+use fmo_api_types::{FederationActivity, TxDetail, TxItemPart};
 use postgres_from_row::FromRow;
 use serde::Serialize;
 
 use crate::api::AppState;
 use crate::federation;
 use crate::observer::FederationObserver;
-use crate::query::{query, query_one, query_value};
+use crate::query::{query, query_one, query_opt, query_value};
 
 pub(super) async fn list_transactions(
     Path(federation_id): Path<FederationId>,
@@ -50,6 +50,21 @@ pub(super) async fn transaction(
     Ok(state
         .observer
         .transaction_details(federation_id, transaction_id)
+        .await?
+        .into())
+}
+
+/// Structured (rich) transaction detail: inputs/outputs read straight from
+/// `transaction_inputs`/`transaction_outputs` (kind + amount + details), not
+/// the Debug-string decode `transaction()` above produces.
+pub(super) async fn transaction_detail(
+    Path((federation_id, txid_hex)): Path<(FederationId, String)>,
+    State(state): State<AppState>,
+) -> crate::error::Result<Json<TxDetail>> {
+    let txid = hex::decode(&txid_hex).context("Invalid txid hex")?;
+    Ok(state
+        .observer
+        .federation_transaction_detail(federation_id, &txid)
         .await?
         .into())
 }
@@ -180,6 +195,92 @@ impl FederationObserver {
             .collect::<Vec<_>>();
 
         Ok(DebugTransaction { inputs, outputs })
+    }
+
+    /// Structured transaction detail: `transactions` row (session/item
+    /// index) + `transaction_inputs`/`transaction_outputs` (index, kind,
+    /// amount, details) ordered by index, + the tx's gold-layer
+    /// `user_tx_key` (if it's a member leg of one), resolved via
+    /// `user_transaction_txs`.
+    pub async fn federation_transaction_detail(
+        &self,
+        federation_id: FederationId,
+        txid: &[u8],
+    ) -> anyhow::Result<TxDetail> {
+        self.get_federation(federation_id)
+            .await
+            .context("Federation doesn't exist")?;
+
+        let fed = federation_id.consensus_encode_to_vec();
+
+        #[derive(FromRow)]
+        struct TxRow {
+            session_index: i64,
+            item_index: i64,
+        }
+
+        let tx = query_opt::<TxRow>(
+            &self.connection().await?,
+            "SELECT session_index::bigint, item_index::bigint FROM transactions
+             WHERE federation_id = $1 AND txid = $2",
+            &[&fed, &txid],
+        )
+        .await?
+        .context("Transaction not found")?;
+
+        #[derive(FromRow)]
+        struct PartRow {
+            index: i32,
+            kind: String,
+            amount_msat: Option<i64>,
+            details: Option<serde_json::Value>,
+        }
+
+        let inputs = query::<PartRow>(
+            &self.connection().await?,
+            "SELECT in_index::int AS index, kind, amount_msat, details FROM transaction_inputs
+             WHERE federation_id = $1 AND txid = $2 ORDER BY in_index",
+            &[&fed, &txid],
+        )
+        .await?;
+
+        let outputs = query::<PartRow>(
+            &self.connection().await?,
+            "SELECT out_index::int AS index, kind, amount_msat, details FROM transaction_outputs
+             WHERE federation_id = $1 AND txid = $2 ORDER BY out_index",
+            &[&fed, &txid],
+        )
+        .await?;
+
+        #[derive(FromRow)]
+        struct UserTxKeyRow {
+            user_tx_key: String,
+        }
+
+        let user_tx_key = query_opt::<UserTxKeyRow>(
+            &self.connection().await?,
+            "SELECT encode(user_tx_key, 'hex') AS user_tx_key FROM user_transaction_txs
+             WHERE federation_id = $1 AND txid = $2 LIMIT 1",
+            &[&fed, &txid],
+        )
+        .await?
+        .map(|row| row.user_tx_key);
+
+        let to_part = |row: PartRow| TxItemPart {
+            index: row.index,
+            kind: row.kind,
+            amount_msat: row.amount_msat,
+            details: row.details,
+        };
+
+        Ok(TxDetail {
+            txid: hex::encode(txid),
+            session_index: tx.session_index,
+            item_index: tx.item_index,
+            inputs: inputs.into_iter().map(to_part).collect(),
+            outputs: outputs.into_iter().map(to_part).collect(),
+            user_tx_key,
+        })
     }
 
     pub async fn transaction_histogram(

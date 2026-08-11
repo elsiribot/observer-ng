@@ -165,3 +165,54 @@ pub struct ConsensusPage {
     pub items: Vec<SessionItem>,
     pub next: Option<(i64, i64)>,
 }
+
+/// One input or output of a structured transaction detail, read straight from
+/// `transaction_inputs`/`transaction_outputs` (not the Debug-string decode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxItemPart {
+    pub index: i32,
+    pub kind: String,
+    pub amount_msat: Option<i64>,
+    pub details: Option<serde_json::Value>,
+}
+
+/// Structured detail of one fedimint transaction: its inputs/outputs (kind +
+/// amount, read from the structural silver tables) plus, if this tx is part
+/// of a deduplicated gold-layer user transaction, that user transaction's key
+/// (join it via `/federations/:federation_id/user-transactions/:user_tx_key`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxDetail {
+    pub txid: String,
+    pub session_index: i64,
+    pub item_index: i64,
+    pub inputs: Vec<TxItemPart>,
+    pub outputs: Vec<TxItemPart>,
+    pub user_tx_key: Option<String>,
+}
+
+/// One fedimint transaction that is a member (leg) of a gold-layer user
+/// transaction, with its role in that user transaction's lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberTx {
+    pub txid: String,
+    /// "offer" | "fund" | "claim" | "cancel" | "refund" | "self"
+    pub role: String,
+    pub session_index: i64,
+}
+
+/// A deduplicated gold-layer user transaction (see `fmo_core::gold`):
+/// grain is `contract_id` for LN kinds, `txid` otherwise. `member_txs` lists
+/// every underlying fedimint transaction and its role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserTransaction {
+    pub kind: String,
+    /// "in" | "out" | "internal"
+    pub direction: String,
+    pub amount_msat: Option<i64>,
+    pub fedimint_fee_msat: Option<i64>,
+    pub gateway_fee_estimate_msat: Option<i64>,
+    pub num_fedimint_txs: i64,
+    pub first_timestamp: Option<i64>,
+    pub last_timestamp: Option<i64>,
+    pub member_txs: Vec<MemberTx>,
+}

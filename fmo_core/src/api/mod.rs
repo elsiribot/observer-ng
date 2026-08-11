@@ -3,6 +3,7 @@ pub mod consensus;
 pub mod federations;
 pub mod sessions;
 pub mod transactions;
+pub mod user_transactions;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
