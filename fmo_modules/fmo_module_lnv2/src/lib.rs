@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use axum::routing::get;
+use axum::Router;
 use chrono::DateTime;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
@@ -7,9 +11,13 @@ use fedimint_lnv2_common::{
     LightningCommonInit, LightningConsensusItem, LightningInput, LightningInputV0, LightningOutput,
     LightningOutputV0,
 };
-use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
+use fmo_core::api::ModuleApiState;
+use fmo_core::module::{
+    CiMeta, ItemMeta, Migration, ModuleTaskCtx, ObserverModule, ProcessCtx, ProcessedItem,
+};
 use tracing::warn;
 
+mod gateways;
 pub mod status;
 
 /// Observer module for the next-generation fedimint `lnv2` lightning module:
@@ -30,7 +38,7 @@ impl ObserverModule for LnV2Observer {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn migrations(&self) -> &'static [Migration] {
@@ -205,5 +213,20 @@ impl ObserverModule for LnV2Observer {
         }
 
         Ok(serde_json::to_value(lnv2_ci).ok())
+    }
+
+    /// Polls the federation's lnv2 gateway registry, on the shared
+    /// `fmo_core::gateway_poll` harness.
+    async fn run_federation_task(self: Arc<Self>, ctx: ModuleTaskCtx) {
+        let federation_id = ctx.federation_id;
+        if let Err(e) =
+            fmo_core::gateway_poll::run_gateway_poller(ctx, gateways::LnV2GatewaySource).await
+        {
+            warn!("lnv2 gateway monitor for {federation_id} exited: {e:?}");
+        }
+    }
+
+    fn api_router(&self) -> Option<Router<ModuleApiState>> {
+        Some(Router::new().route("/gateways", get(gateways::get_federation_gateways)))
     }
 }

@@ -8,9 +8,13 @@ anyhow = "1.0.81"
 async-trait = "0.1"
 axum = { version = "0.7.5", features = ["json"] }
 chrono = { version = "0.4.38", features = ["serde"] }
+fedimint-api-client = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-lnv2-common = { workspace = true }
+futures = "0.3.30"
 fmo_core = { path = "../../fmo_core" }
+postgres-from-row = "0.5.2"
+serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.115"
 tokio-postgres = "0.7.11"
 tracing = "0.1.40"
