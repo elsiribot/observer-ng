@@ -17,19 +17,13 @@ use fedimint_ln_common::federation_endpoint_constants::LIST_GATEWAYS_ENDPOINT;
 use fedimint_ln_common::LightningGatewayAnnouncement;
 use fmo_api_types::{GatewayActivityMetrics, GatewayInfo, GatewayUptimeMetrics};
 use fmo_core::api::ModuleApiState;
-use fmo_core::gateway_poll::{GatewaySource, PolledGateway};
+use fmo_core::gateway_poll::{self, GatewaySource, PolledGateway};
 use fmo_core::module::ModuleTaskCtx;
 use fmo_core::query::query;
 use futures::future::join_all;
 use serde::Deserialize;
 use tokio_postgres::Transaction;
 use tracing::warn;
-
-// Used by `list_federation_gateways` to translate uptime-snapshot sample
-// counts into online/offline minutes; must match the poller's cadence
-// (`FO_GATEWAY_POLL_SECS` overrides it at runtime but this is the default
-// used for the display estimate, matching `fmo_core::gateway_poll`).
-const GATEWAY_POLL_INTERVAL_MINUTES: u64 = 5;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum GatewayMetricsWindow {
@@ -83,17 +77,17 @@ pub(crate) struct LnGatewaySource;
 
 #[async_trait::async_trait]
 impl GatewaySource for LnGatewaySource {
+    type Fetched = HashMap<String, LightningGatewayAnnouncement>;
+
     fn schema(&self) -> &'static str {
         "fmo_ln"
     }
 
-    async fn fetch_and_upsert(
+    async fn fetch(
         &self,
-        dbtx: &Transaction<'_>,
         ctx: &ModuleTaskCtx,
         api: &DynGlobalApi,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<Vec<PolledGateway>> {
+    ) -> anyhow::Result<Self::Fetched> {
         let federation_id = ctx.federation_id;
 
         let ln_instance_id = ctx
@@ -151,16 +145,36 @@ impl GatewaySource for LnGatewaySource {
             );
         }
 
-        let federation_id_bytes = federation_id.consensus_encode_to_vec();
+        Ok(merged)
+    }
 
-        let mut gateway_ids = Vec::with_capacity(merged.len());
-        let mut node_pub_keys = Vec::with_capacity(merged.len());
-        let mut api_endpoints = Vec::with_capacity(merged.len());
-        let mut lightning_aliases = Vec::with_capacity(merged.len());
-        let mut vetted_flags = Vec::with_capacity(merged.len());
-        let mut raw_announcements = Vec::with_capacity(merged.len());
+    fn polled_gateways(&self, fetched: &Self::Fetched) -> Vec<PolledGateway> {
+        fetched
+            .iter()
+            .map(|(gateway_id, gw)| PolledGateway {
+                gateway_id: gateway_id.clone(),
+                api_endpoint: Some(gw.info.api.to_string()),
+            })
+            .collect()
+    }
 
-        for (gateway_id, gw) in &merged {
+    async fn upsert(
+        &self,
+        dbtx: &Transaction<'_>,
+        ctx: &ModuleTaskCtx,
+        now: DateTime<Utc>,
+        fetched: &Self::Fetched,
+    ) -> anyhow::Result<()> {
+        let federation_id_bytes = ctx.federation_id.consensus_encode_to_vec();
+
+        let mut gateway_ids = Vec::with_capacity(fetched.len());
+        let mut node_pub_keys = Vec::with_capacity(fetched.len());
+        let mut api_endpoints = Vec::with_capacity(fetched.len());
+        let mut lightning_aliases = Vec::with_capacity(fetched.len());
+        let mut vetted_flags = Vec::with_capacity(fetched.len());
+        let mut raw_announcements = Vec::with_capacity(fetched.len());
+
+        for (gateway_id, gw) in fetched {
             gateway_ids.push(gateway_id.clone());
             node_pub_keys.push(gw.info.node_pub_key.to_string());
             api_endpoints.push(gw.info.api.to_string());
@@ -213,13 +227,7 @@ impl GatewaySource for LnGatewaySource {
             .await?;
         }
 
-        Ok(merged
-            .into_iter()
-            .map(|(gateway_id, gw)| PolledGateway {
-                gateway_id,
-                api_endpoint: Some(gw.info.api.to_string()),
-            })
-            .collect())
+        Ok(())
     }
 }
 
@@ -432,10 +440,10 @@ async fn list_federation_gateways(
         .map(|row| {
             let seen_samples = row.seen_samples.max(0) as u64;
             let total_samples = row.total_samples.max(0) as u64;
-            let online_minutes = seen_samples.saturating_mul(GATEWAY_POLL_INTERVAL_MINUTES);
+            let online_minutes = seen_samples.saturating_mul(gateway_poll::POLL_INTERVAL_MINUTES);
             let offline_minutes = total_samples
                 .saturating_sub(seen_samples)
-                .saturating_mul(GATEWAY_POLL_INTERVAL_MINUTES);
+                .saturating_mul(gateway_poll::POLL_INTERVAL_MINUTES);
             let uptime_pct = if total_samples > 0 {
                 (seen_samples as f64 / total_samples as f64) * 100.0
             } else {

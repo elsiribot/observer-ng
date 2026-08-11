@@ -20,6 +20,7 @@ use fmo_core::module::ModuleTaskCtx;
 use fmo_core::query::query;
 use futures::future::join_all;
 use tokio_postgres::Transaction;
+use tracing::warn;
 
 /// The LNv2 `GatewaySource`: queries every peer's `GATEWAYS_ENDPOINT` on the
 /// lnv2 module instance and merges the union of gateway API URLs. The poll
@@ -29,17 +30,17 @@ pub(crate) struct LnV2GatewaySource;
 
 #[async_trait::async_trait]
 impl GatewaySource for LnV2GatewaySource {
+    type Fetched = Vec<String>;
+
     fn schema(&self) -> &'static str {
         "fmo_lnv2"
     }
 
-    async fn fetch_and_upsert(
+    async fn fetch(
         &self,
-        dbtx: &Transaction<'_>,
         ctx: &ModuleTaskCtx,
         api: &DynGlobalApi,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<Vec<PolledGateway>> {
+    ) -> anyhow::Result<Self::Fetched> {
         let instance_id = ctx
             .config
             .modules
@@ -49,23 +50,34 @@ impl GatewaySource for LnV2GatewaySource {
         let peer_ids: Vec<_> = ctx.config.global.api_endpoints.keys().copied().collect();
 
         let results = join_all(peer_ids.into_iter().map(|peer| async move {
-            api.with_module(instance_id)
+            let result = api
+                .with_module(instance_id)
                 .request_single_peer::<Vec<SafeUrl>>(
                     GATEWAYS_ENDPOINT.to_owned(),
                     ApiRequestErased::default(),
                     peer,
                 )
-                .await
-                .ok()
+                .await;
+            (peer, result)
         }))
         .await;
 
         let mut urls = BTreeSet::new();
         let mut any = false;
-        for r in results.into_iter().flatten() {
-            any = true;
-            for u in r {
-                urls.insert(u.to_string());
+        for (peer, result) in results {
+            match result {
+                Ok(r) => {
+                    any = true;
+                    for u in r {
+                        urls.insert(u.to_string());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch lnv2 gateways from peer {} for {}: {:?}",
+                        peer, ctx.federation_id, e
+                    );
+                }
             }
         }
         if !any {
@@ -75,25 +87,37 @@ impl GatewaySource for LnV2GatewaySource {
             );
         }
 
+        Ok(urls.into_iter().collect())
+    }
+
+    fn polled_gateways(&self, fetched: &Self::Fetched) -> Vec<PolledGateway> {
+        fetched
+            .iter()
+            .map(|u| PolledGateway {
+                gateway_id: u.clone(),
+                api_endpoint: Some(u.clone()),
+            })
+            .collect()
+    }
+
+    async fn upsert(
+        &self,
+        dbtx: &Transaction<'_>,
+        ctx: &ModuleTaskCtx,
+        now: DateTime<Utc>,
+        fetched: &Self::Fetched,
+    ) -> anyhow::Result<()> {
         let fed = ctx.federation_id.consensus_encode_to_vec();
-        let url_vec: Vec<String> = urls.iter().cloned().collect();
-        if !url_vec.is_empty() {
+        if !fetched.is_empty() {
             dbtx.execute(
                 "INSERT INTO gateways (federation_id, gateway_id, api_endpoint, first_seen, last_seen)
                  SELECT $1, u, u, $2, $2 FROM UNNEST($3::text[]) AS u
                  ON CONFLICT (federation_id, gateway_id) DO UPDATE SET last_seen = EXCLUDED.last_seen",
-                &[&fed, &now, &url_vec],
+                &[&fed, &now, fetched],
             )
             .await?;
         }
-
-        Ok(urls
-            .into_iter()
-            .map(|u| PolledGateway {
-                gateway_id: u.clone(),
-                api_endpoint: Some(u),
-            })
-            .collect())
+        Ok(())
     }
 }
 

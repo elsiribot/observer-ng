@@ -17,6 +17,10 @@ pub async fn recompute_contract_status(
 ) -> anyhow::Result<()> {
     dbtx.execute(
         "UPDATE contracts c SET status = CASE
+             -- Outgoing `refunded`: applied as soon as the `cancel` output is
+             -- seen, which precedes (or coincides with) the on-ledger refund
+             -- input; monotonic within this taxonomy since outgoing contracts
+             -- have no limbo state between cancel and refund settling.
              WHEN c.type = 'outgoing'
                   AND EXISTS (SELECT 1 FROM output_contracts oc
                               WHERE oc.federation_id = c.federation_id
@@ -28,6 +32,12 @@ pub async fn recompute_contract_status(
                               WHERE ic.federation_id = c.federation_id
                                 AND ic.contract_id = c.contract_id)
                   THEN 'succeeded'
+             -- Known limitation: an incoming contract whose preimage decrypted
+             -- to an INVALID value and was then refunded still lands here as
+             -- succeeded, because LNv1 inputs don't record a claim/refund
+             -- variant and the decryption *result* isn't on-ledger — it isn't
+             -- derivable offline. Rare, no worse than before this feature;
+             -- do not attempt to fix without an on-ledger variant to key on.
              WHEN c.type = 'incoming'
                   AND EXISTS (SELECT 1 FROM input_contracts ic
                               WHERE ic.federation_id = c.federation_id
