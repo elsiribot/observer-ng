@@ -154,3 +154,14 @@ pub struct SessionItem {
     pub user_tx_key: Option<String>,
     pub details: Option<serde_json::Value>,
 }
+
+/// A keyset-paginated page of the federation-wide consensus item stream.
+/// `next` is the `(session_index, item_index)` of the last item returned,
+/// to be passed back as `before_session`/`before_item` for the next page, or
+/// `None` when fewer than the requested `limit` items were returned (i.e.
+/// this was the last page).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusPage {
+    pub items: Vec<SessionItem>,
+    pub next: Option<(i64, i64)>,
+}

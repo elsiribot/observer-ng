@@ -1,4 +1,5 @@
 pub mod config;
+pub mod consensus;
 pub mod federations;
 pub mod sessions;
 pub mod transactions;
