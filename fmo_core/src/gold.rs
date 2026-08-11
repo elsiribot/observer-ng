@@ -70,7 +70,7 @@ pub async fn fold_standalone(
         "INSERT INTO user_transactions
            (federation_id, user_tx_key, kind, direction, amount_msat,
             fedimint_fee_msat, num_fedimint_txs, first_session_index,
-            first_timestamp, last_timestamp, status)
+            first_timestamp, last_timestamp)
          SELECT t.federation_id, t.txid,
                 CASE
                   WHEN i.kinds @> ARRAY['wallet'] AND NOT (i.kinds && ARRAY['ln','lnv2']) THEN 'peg_in'
@@ -105,7 +105,7 @@ pub async fn fold_standalone(
                   WHEN o.kinds @> ARRAY['walletv2'] THEN o.walletv2_amt
                   ELSE i.amt END AS amount_msat,
                 (i.amt - o.amt) AS fedimint_fee_msat,
-                1, t.session_index, st.estimated_session_timestamp, st.estimated_session_timestamp, 'completed'
+                1, t.session_index, st.estimated_session_timestamp, st.estimated_session_timestamp
          FROM transactions t
          JOIN LATERAL (SELECT array_agg(DISTINCT kind) kinds, SUM(amount_msat) amt,
                               SUM(amount_msat) FILTER (WHERE kind='wallet') wallet_amt,
@@ -196,7 +196,7 @@ async fn fold_ln_v1(
 ) -> anyhow::Result<()> {
     let query = format!(
         "INSERT INTO user_transactions (federation_id, user_tx_key, kind, direction, amount_msat,
-            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp, status)
+            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp)
          SELECT c.federation_id, c.contract_id,
                 CASE WHEN c.type='incoming' THEN 'ln_receive' ELSE 'ln_send' END,
                 CASE WHEN c.type='incoming' THEN 'in' ELSE 'out' END,
@@ -204,10 +204,7 @@ async fn fold_ln_v1(
                 fees.fee_msat,
                 legs.n,
                 legs.first_session,
-                fst.estimated_session_timestamp, lst.estimated_session_timestamp,
-                CASE WHEN spends.\"any\" THEN 'completed'
-                     WHEN cancels.\"any\" THEN 'cancelled'
-                     ELSE 'in_flight' END
+                fst.estimated_session_timestamp, lst.estimated_session_timestamp
          FROM fmo_ln.contracts c
          JOIN (SELECT federation_id, contract_id, SUM(o.amount_msat) amount_msat
                FROM fmo_ln.output_contracts oc JOIN transaction_outputs o USING (federation_id, txid, out_index)
@@ -230,10 +227,6 @@ async fn fold_ln_v1(
                  FROM (SELECT DISTINCT federation_id, txid FROM (
                         SELECT federation_id, txid FROM fmo_ln.output_contracts WHERE federation_id=c.federation_id AND contract_id=c.contract_id
                         UNION SELECT federation_id, txid FROM fmo_ln.input_contracts WHERE federation_id=c.federation_id AND contract_id=c.contract_id) u) x) f) fees ON true
-         JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_ln.input_contracts
-                       WHERE federation_id=c.federation_id AND contract_id=c.contract_id) spends ON true
-         LEFT JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_ln.output_contracts
-                       WHERE federation_id=c.federation_id AND contract_id=c.contract_id AND interaction_kind='cancel') cancels ON true
          LEFT JOIN session_times fst ON fst.federation_id=c.federation_id AND fst.session_index=legs.first_session
          LEFT JOIN session_times lst ON lst.federation_id=c.federation_id AND lst.session_index=legs.last_session
          WHERE (c.federation_id, c.contract_id) IN {LN_TOUCHED_CONTRACTS}
@@ -241,7 +234,7 @@ async fn fold_ln_v1(
             kind=EXCLUDED.kind, direction=EXCLUDED.direction, amount_msat=EXCLUDED.amount_msat,
             fedimint_fee_msat=EXCLUDED.fedimint_fee_msat, num_fedimint_txs=EXCLUDED.num_fedimint_txs,
             first_session_index=EXCLUDED.first_session_index, first_timestamp=EXCLUDED.first_timestamp,
-            last_timestamp=EXCLUDED.last_timestamp, status=EXCLUDED.status"
+            last_timestamp=EXCLUDED.last_timestamp"
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
 
@@ -277,7 +270,7 @@ async fn fold_ln_v1(
 async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> anyhow::Result<()> {
     let query = format!(
         "INSERT INTO user_transactions (federation_id, user_tx_key, kind, direction, amount_msat,
-            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp, status)
+            fedimint_fee_msat, num_fedimint_txs, first_session_index, first_timestamp, last_timestamp)
          SELECT c.federation_id, c.contract_id,
                 CASE WHEN c.type='incoming' THEN 'lnv2_receive' ELSE 'lnv2_send' END,
                 CASE WHEN c.type='incoming' THEN 'in' ELSE 'out' END,
@@ -285,8 +278,7 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
                 fees.fee_msat,
                 legs.n,
                 legs.first_session,
-                fst.estimated_session_timestamp, lst.estimated_session_timestamp,
-                CASE WHEN spends.\"any\" THEN 'completed' ELSE 'in_flight' END
+                fst.estimated_session_timestamp, lst.estimated_session_timestamp
          FROM fmo_lnv2.contracts c
          JOIN (SELECT federation_id, contract_id, COUNT(DISTINCT txid) n,
                       MIN(session_index) first_session, MAX(session_index) last_session
@@ -309,8 +301,6 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
                         UNION
                         SELECT io.federation_id, io.txid FROM fmo_lnv2.input_outpoints io
                           WHERE io.federation_id=c.federation_id AND io.outpoint_txid=c.txid AND io.outpoint_out_index=c.out_index) u) x) f) fees ON true
-         JOIN LATERAL (SELECT bool_or(true) AS \"any\" FROM fmo_lnv2.input_outpoints io
-                       WHERE io.federation_id=c.federation_id AND io.outpoint_txid=c.txid AND io.outpoint_out_index=c.out_index) spends ON true
          LEFT JOIN session_times fst ON fst.federation_id=c.federation_id AND fst.session_index=legs.first_session
          LEFT JOIN session_times lst ON lst.federation_id=c.federation_id AND lst.session_index=legs.last_session
          WHERE (c.federation_id, c.contract_id) IN {LNV2_TOUCHED_CONTRACTS}
@@ -318,7 +308,7 @@ async fn fold_lnv2(dbtx: &Transaction<'_>, fed: &[u8], start: i32, end: i32) -> 
             kind=EXCLUDED.kind, direction=EXCLUDED.direction, amount_msat=EXCLUDED.amount_msat,
             fedimint_fee_msat=EXCLUDED.fedimint_fee_msat, num_fedimint_txs=EXCLUDED.num_fedimint_txs,
             first_session_index=EXCLUDED.first_session_index, first_timestamp=EXCLUDED.first_timestamp,
-            last_timestamp=EXCLUDED.last_timestamp, status=EXCLUDED.status"
+            last_timestamp=EXCLUDED.last_timestamp"
     );
     dbtx.execute(&query, &[&fed, &start, &end]).await?;
 

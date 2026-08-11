@@ -918,7 +918,7 @@ async fn fold_ln_groups_offer_fund_claim_into_one_receive() {
     let conn = pool.get().await.unwrap();
     let row = conn
         .query_one(
-            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+            "SELECT kind, direction, amount_msat, num_fedimint_txs
              FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_id],
         )
@@ -927,7 +927,6 @@ async fn fold_ln_groups_offer_fund_claim_into_one_receive() {
     assert_eq!(row.get::<_, String>("kind"), "ln_receive");
     assert_eq!(row.get::<_, String>("direction"), "in");
     assert_eq!(row.get::<_, i64>("amount_msat"), 10_000);
-    assert_eq!(row.get::<_, String>("status"), "completed");
     assert_eq!(row.get::<_, i32>("num_fedimint_txs"), 3);
 
     let user_tx_count: i64 = conn
@@ -1045,13 +1044,12 @@ async fn fold_ln_without_claim_is_in_flight() {
     let conn = pool.get().await.unwrap();
     let row = conn
         .query_one(
-            "SELECT status, num_fedimint_txs, amount_msat
+            "SELECT num_fedimint_txs, amount_msat
              FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_id],
         )
         .await
         .unwrap();
-    assert_eq!(row.get::<_, String>("status"), "in_flight");
     assert_eq!(row.get::<_, i32>("num_fedimint_txs"), 2);
     assert_eq!(row.get::<_, i64>("amount_msat"), 5_000);
 }
@@ -1147,25 +1145,23 @@ async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
     let conn = pool.get().await.unwrap();
     let b_row_before = conn
         .query_one(
-            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+            "SELECT kind, direction, amount_msat, num_fedimint_txs
              FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_b],
         )
         .await
         .unwrap();
-    assert_eq!(b_row_before.get::<_, String>("status"), "completed");
     assert_eq!(b_row_before.get::<_, i64>("amount_msat"), 7_777);
     assert_eq!(b_row_before.get::<_, i32>("num_fedimint_txs"), 2);
 
     let a_row_before = conn
         .query_one(
-            "SELECT status, num_fedimint_txs FROM user_transactions
+            "SELECT num_fedimint_txs FROM user_transactions
              WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_a],
         )
         .await
         .unwrap();
-    assert_eq!(a_row_before.get::<_, String>("status"), "in_flight");
     assert_eq!(a_row_before.get::<_, i32>("num_fedimint_txs"), 1);
     drop(conn);
 
@@ -1197,14 +1193,13 @@ async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
     // session range, and not some blend with contract B's data.
     let a_row_after = conn
         .query_one(
-            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+            "SELECT kind, direction, amount_msat, num_fedimint_txs
              FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_a],
         )
         .await
         .unwrap();
     assert_eq!(a_row_after.get::<_, String>("kind"), "ln_receive");
-    assert_eq!(a_row_after.get::<_, String>("status"), "completed");
     assert_eq!(
         a_row_after.get::<_, i64>("amount_msat"),
         10_000,
@@ -1230,7 +1225,7 @@ async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
     // touch any of its legs.
     let b_row_after = conn
         .query_one(
-            "SELECT kind, direction, amount_msat, status, num_fedimint_txs
+            "SELECT kind, direction, amount_msat, num_fedimint_txs
              FROM user_transactions WHERE federation_id = $1 AND user_tx_key = $2",
             &[&fed, &contract_b],
         )
@@ -1247,10 +1242,6 @@ async fn fold_ln_scopes_aggregation_to_touched_contracts_only() {
     assert_eq!(
         b_row_after.get::<_, i64>("amount_msat"),
         b_row_before.get::<_, i64>("amount_msat")
-    );
-    assert_eq!(
-        b_row_after.get::<_, String>("status"),
-        b_row_before.get::<_, String>("status")
     );
     assert_eq!(
         b_row_after.get::<_, i32>("num_fedimint_txs"),
@@ -1710,14 +1701,14 @@ async fn user_tx_daily_rolls_up_after_refresh() {
         .await
         .unwrap();
 
-    // Green: after refresh, peg_in rows (same kind/direction/status) roll up
+    // Green: after refresh, peg_in rows (same kind/direction) roll up
     // together and peg_out stays a separate group.
     let peg_in_row = conn
         .query_one(
             "SELECT tx_count, volume_msat::bigint, fedimint_fee_msat::bigint
              FROM user_tx_daily
              WHERE federation_id = $1 AND day = '2024-01-15' AND kind = 'peg_in'
-               AND direction = 'in' AND status = 'completed'",
+               AND direction = 'in'",
             &[&fed],
         )
         .await
@@ -1731,7 +1722,7 @@ async fn user_tx_daily_rolls_up_after_refresh() {
             "SELECT tx_count, volume_msat::bigint, fedimint_fee_msat::bigint
              FROM user_tx_daily
              WHERE federation_id = $1 AND day = '2024-01-15' AND kind = 'peg_out'
-               AND direction = 'out' AND status = 'completed'",
+               AND direction = 'out'",
             &[&fed],
         )
         .await
