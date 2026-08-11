@@ -14,6 +14,7 @@ pub mod module;
 pub mod observer;
 pub mod registry;
 pub mod services;
+pub mod session_stats;
 #[cfg(feature = "test-util")]
 pub mod test_util;
 

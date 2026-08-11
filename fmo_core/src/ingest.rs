@@ -60,10 +60,18 @@ pub async fn ingest_session(
     )
     .await?;
 
+    // Tallied alongside the structural inserts below and written into
+    // `session_stats` once the loop finishes, so the session-list API can
+    // read per-session counts in O(1) instead of counting rows on request.
+    let mut tx_count: i32 = 0;
+    let mut ci_count: i32 = 0;
+    let mut ci_by_kind: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+
     for (item_index, accepted_item) in session.items.iter().enumerate() {
         match &accepted_item.item {
             ConsensusItem::Transaction(transaction) => {
                 let txid = transaction.tx_hash();
+                tx_count += 1;
 
                 dbtx.execute(
                     &insert_transaction,
@@ -107,6 +115,8 @@ pub async fn ingest_session(
             }
             ConsensusItem::Module(module_ci) => {
                 let kind = instance_to_kind(config, module_ci.module_instance_id());
+                ci_count += 1;
+                *ci_by_kind.entry(kind.clone()).or_insert(0) += 1;
                 dbtx.execute(
                     &insert_ci,
                     &[
@@ -124,6 +134,19 @@ pub async fn ingest_session(
             }
         }
     }
+
+    dbtx.execute(
+        "INSERT INTO session_stats (federation_id, session_index, tx_count, ci_count, items_by_kind)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        &[
+            &federation_id_bytes,
+            &(session_index as i32),
+            &tx_count,
+            &ci_count,
+            &serde_json::to_value(&ci_by_kind)?,
+        ],
+    )
+    .await?;
 
     Ok(())
 }

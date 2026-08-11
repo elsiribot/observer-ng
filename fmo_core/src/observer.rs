@@ -262,6 +262,35 @@ impl FederationObserver {
             );
         }
 
+        {
+            let observer = self.clone();
+            self.task_group.spawn_cancellable(
+                format!("session stats backfill {federation_id}"),
+                async move {
+                    let federation_id_bytes = federation_id.consensus_encode_to_vec();
+                    // Self-terminating: once no gaps remain the backfill is
+                    // done for good (ingest keeps new sessions' stats up to
+                    // date), so the task simply idles/ends instead of
+                    // looping forever like the other per-federation tasks.
+                    loop {
+                        match crate::session_stats::backfill_session_stats(
+                            &observer.pool,
+                            &federation_id_bytes,
+                        )
+                        .await
+                        {
+                            Ok(()) => break,
+                            Err(e) => {
+                                error!("Session stats backfill errored, restarting in 30s: {e}");
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                            }
+                        }
+                    }
+                }
+                .instrument(info_span!("session_stats_backfill", fed = %federation_id.to_prefix())),
+            );
+        }
+
         for (kind, module) in self.registry.iter() {
             let module = module.clone();
             let ctx = ModuleTaskCtx {
