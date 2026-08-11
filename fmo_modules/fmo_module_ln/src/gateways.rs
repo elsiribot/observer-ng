@@ -4,7 +4,6 @@
 //! payment activity metrics are computed from the modular tables.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use anyhow::{bail, Context};
 use axum::extract::{Path, Query, State};
@@ -12,22 +11,25 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use fedimint_api_client::api::{DynGlobalApi, FederationApiExt};
 use fedimint_core::config::FederationId;
-use fedimint_core::core::ModuleInstanceId;
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::ApiRequestErased;
 use fedimint_ln_common::federation_endpoint_constants::LIST_GATEWAYS_ENDPOINT;
 use fedimint_ln_common::LightningGatewayAnnouncement;
 use fmo_api_types::{GatewayActivityMetrics, GatewayInfo, GatewayUptimeMetrics};
 use fmo_core::api::ModuleApiState;
+use fmo_core::gateway_poll::{GatewaySource, PolledGateway};
 use fmo_core::module::ModuleTaskCtx;
 use fmo_core::query::query;
 use futures::future::join_all;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tokio_postgres::Transaction;
+use tracing::warn;
 
+// Used by `list_federation_gateways` to translate uptime-snapshot sample
+// counts into online/offline minutes; must match the poller's cadence
+// (`FO_GATEWAY_POLL_SECS` overrides it at runtime but this is the default
+// used for the display estimate, matching `fmo_core::gateway_poll`).
 const GATEWAY_POLL_INTERVAL_MINUTES: u64 = 5;
-const GATEWAY_SNAPSHOT_RETENTION_DAYS: i64 = 90;
-const GATEWAY_PRUNE_INTERVAL_HOURS: i64 = 6;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum GatewayMetricsWindow {
@@ -73,216 +75,152 @@ impl GatewayMetricsWindow {
     }
 }
 
-/// The LN module's per-federation background task: polls all guardians for
-/// registered gateways and persists the merged result.
-pub(crate) async fn monitor_gateways(ctx: ModuleTaskCtx) -> anyhow::Result<()> {
-    let poll_secs = std::env::var("FO_GATEWAY_POLL_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(GATEWAY_POLL_INTERVAL_MINUTES * 60);
+/// The LNv1 `GatewaySource`: queries every guardian's `LIST_GATEWAYS_ENDPOINT`,
+/// merges the union by gateway_id and upserts into `fmo_ln.gateways`. The
+/// poll loop, ping and snapshot/prune bookkeeping live in
+/// `fmo_core::gateway_poll`.
+pub(crate) struct LnGatewaySource;
 
-    let peers = ctx
-        .config
-        .global
-        .api_endpoints
-        .iter()
-        .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone()))
-        .collect();
-    let api = DynGlobalApi::new(ctx.connectors.clone(), peers, None)?;
-
-    let ln_instance_id = ctx
-        .config
-        .modules
-        .iter()
-        .find_map(|(&instance_id, module)| (module.kind.as_str() == "ln").then_some(instance_id))
-        .context("No LN module found in federation config")?;
-
-    let peer_ids: Vec<fedimint_core::PeerId> =
-        ctx.config.global.api_endpoints.keys().copied().collect();
-
-    let mut interval = tokio::time::interval(Duration::from_secs(poll_secs));
-    loop {
-        interval.tick().await;
-        if let Err(e) =
-            fetch_and_store_gateways(&ctx, ctx.federation_id, &api, ln_instance_id, &peer_ids).await
-        {
-            warn!(
-                "Failed to fetch gateways for federation {}: {:?}",
-                ctx.federation_id, e
-            );
-        }
+#[async_trait::async_trait]
+impl GatewaySource for LnGatewaySource {
+    fn schema(&self) -> &'static str {
+        "fmo_ln"
     }
-}
 
-async fn fetch_and_store_gateways(
-    ctx: &ModuleTaskCtx,
-    federation_id: FederationId,
-    api: &DynGlobalApi,
-    ln_instance_id: ModuleInstanceId,
-    peer_ids: &[fedimint_core::PeerId],
-) -> anyhow::Result<()> {
-    // Query all peers and merge by gateway_id — each guardian has their own
-    // registry so we take the union across all peers.
-    let mut merged: HashMap<String, LightningGatewayAnnouncement> = HashMap::new();
-    let mut successful_peer_queries: u32 = 0;
-    let peer_results = join_all(peer_ids.iter().copied().map(|peer_id| async move {
-        let result: anyhow::Result<Vec<LightningGatewayAnnouncement>> = api
-            .with_module(ln_instance_id)
-            .request_single_peer(
-                LIST_GATEWAYS_ENDPOINT.to_owned(),
-                ApiRequestErased::default(),
-                peer_id,
-            )
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|value| serde_json::from_value(value).map_err(anyhow::Error::from));
-        (peer_id, result)
-    }))
-    .await;
+    async fn fetch_and_upsert(
+        &self,
+        dbtx: &Transaction<'_>,
+        ctx: &ModuleTaskCtx,
+        api: &DynGlobalApi,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<PolledGateway>> {
+        let federation_id = ctx.federation_id;
 
-    for (peer_id, result) in peer_results {
-        match result {
-            Ok(gateways) => {
-                successful_peer_queries += 1;
-                for gw in gateways {
-                    merged.entry(gw.info.gateway_id.to_string()).or_insert(gw);
+        let ln_instance_id = ctx
+            .config
+            .modules
+            .iter()
+            .find_map(|(&instance_id, module)| {
+                (module.kind.as_str() == "ln").then_some(instance_id)
+            })
+            .context("No LN module found in federation config")?;
+
+        let peer_ids: Vec<fedimint_core::PeerId> =
+            ctx.config.global.api_endpoints.keys().copied().collect();
+
+        // Query all peers and merge by gateway_id — each guardian has their own
+        // registry so we take the union across all peers.
+        let mut merged: HashMap<String, LightningGatewayAnnouncement> = HashMap::new();
+        let mut successful_peer_queries: u32 = 0;
+        let peer_results = join_all(peer_ids.iter().copied().map(|peer_id| async move {
+            let result: anyhow::Result<Vec<LightningGatewayAnnouncement>> = api
+                .with_module(ln_instance_id)
+                .request_single_peer(
+                    LIST_GATEWAYS_ENDPOINT.to_owned(),
+                    ApiRequestErased::default(),
+                    peer_id,
+                )
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|value| serde_json::from_value(value).map_err(anyhow::Error::from));
+            (peer_id, result)
+        }))
+        .await;
+
+        for (peer_id, result) in peer_results {
+            match result {
+                Ok(gateways) => {
+                    successful_peer_queries += 1;
+                    for gw in gateways {
+                        merged.entry(gw.info.gateway_id.to_string()).or_insert(gw);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch gateways from peer {} for {}: {:?}",
+                        peer_id, federation_id, e
+                    );
                 }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch gateways from peer {} for {}: {:?}",
-                    peer_id, federation_id, e
-                );
-            }
         }
+
+        if successful_peer_queries == 0 {
+            bail!(
+                "No successful gateway registry responses from any federation peer for {}",
+                federation_id
+            );
+        }
+
+        let federation_id_bytes = federation_id.consensus_encode_to_vec();
+
+        let mut gateway_ids = Vec::with_capacity(merged.len());
+        let mut node_pub_keys = Vec::with_capacity(merged.len());
+        let mut api_endpoints = Vec::with_capacity(merged.len());
+        let mut lightning_aliases = Vec::with_capacity(merged.len());
+        let mut vetted_flags = Vec::with_capacity(merged.len());
+        let mut raw_announcements = Vec::with_capacity(merged.len());
+
+        for (gateway_id, gw) in &merged {
+            gateway_ids.push(gateway_id.clone());
+            node_pub_keys.push(gw.info.node_pub_key.to_string());
+            api_endpoints.push(gw.info.api.to_string());
+            lightning_aliases.push(gw.info.lightning_alias.clone());
+            vetted_flags.push(gw.vetted);
+            raw_announcements.push(serde_json::to_string(gw)?);
+        }
+
+        if !gateway_ids.is_empty() {
+            dbtx.execute(
+                "INSERT INTO fmo_ln.gateways
+                     (federation_id, gateway_id, node_pub_key, api_endpoint,
+                      lightning_alias, vetted, raw, first_seen, last_seen)
+                 SELECT
+                     $1,
+                     gw.gateway_id,
+                     gw.node_pub_key,
+                     gw.api_endpoint,
+                     gw.lightning_alias,
+                     gw.vetted,
+                     gw.raw_json::jsonb,
+                     $2,
+                     $2
+                 FROM UNNEST(
+                     $3::text[],
+                     $4::text[],
+                     $5::text[],
+                     $6::text[],
+                     $7::boolean[],
+                     $8::text[]
+                 ) AS gw(gateway_id, node_pub_key, api_endpoint, lightning_alias, vetted, raw_json)
+                 ON CONFLICT (federation_id, gateway_id) DO UPDATE
+                     SET node_pub_key    = EXCLUDED.node_pub_key,
+                         api_endpoint    = EXCLUDED.api_endpoint,
+                         lightning_alias = EXCLUDED.lightning_alias,
+                         vetted          = EXCLUDED.vetted,
+                         raw             = EXCLUDED.raw,
+                         last_seen       = EXCLUDED.last_seen",
+                &[
+                    &federation_id_bytes,
+                    &now,
+                    &gateway_ids,
+                    &node_pub_keys,
+                    &api_endpoints,
+                    &lightning_aliases,
+                    &vetted_flags,
+                    &raw_announcements,
+                ],
+            )
+            .await?;
+        }
+
+        Ok(merged
+            .into_iter()
+            .map(|(gateway_id, gw)| PolledGateway {
+                gateway_id,
+                api_endpoint: Some(gw.info.api.to_string()),
+            })
+            .collect())
     }
-
-    if successful_peer_queries == 0 {
-        bail!(
-            "No successful gateway registry responses from any federation peer for {}",
-            federation_id
-        );
-    }
-
-    let mut conn = ctx.pool.get().await?;
-    let dbtx = conn.transaction().await?;
-    let now = chrono::Utc::now();
-    let federation_id_bytes = federation_id.consensus_encode_to_vec();
-
-    let mut gateway_ids = Vec::with_capacity(merged.len());
-    let mut node_pub_keys = Vec::with_capacity(merged.len());
-    let mut api_endpoints = Vec::with_capacity(merged.len());
-    let mut lightning_aliases = Vec::with_capacity(merged.len());
-    let mut vetted_flags = Vec::with_capacity(merged.len());
-    let mut raw_announcements = Vec::with_capacity(merged.len());
-
-    for (gateway_id, gw) in &merged {
-        gateway_ids.push(gateway_id.clone());
-        node_pub_keys.push(gw.info.node_pub_key.to_string());
-        api_endpoints.push(gw.info.api.to_string());
-        lightning_aliases.push(gw.info.lightning_alias.clone());
-        vetted_flags.push(gw.vetted);
-        raw_announcements.push(serde_json::to_string(gw)?);
-    }
-
-    if !gateway_ids.is_empty() {
-        dbtx.execute(
-            "INSERT INTO fmo_ln.gateways
-                 (federation_id, gateway_id, node_pub_key, api_endpoint,
-                  lightning_alias, vetted, raw, first_seen, last_seen)
-             SELECT
-                 $1,
-                 gw.gateway_id,
-                 gw.node_pub_key,
-                 gw.api_endpoint,
-                 gw.lightning_alias,
-                 gw.vetted,
-                 gw.raw_json::jsonb,
-                 $2,
-                 $2
-             FROM UNNEST(
-                 $3::text[],
-                 $4::text[],
-                 $5::text[],
-                 $6::text[],
-                 $7::boolean[],
-                 $8::text[]
-             ) AS gw(gateway_id, node_pub_key, api_endpoint, lightning_alias, vetted, raw_json)
-             ON CONFLICT (federation_id, gateway_id) DO UPDATE
-                 SET node_pub_key    = EXCLUDED.node_pub_key,
-                     api_endpoint    = EXCLUDED.api_endpoint,
-                     lightning_alias = EXCLUDED.lightning_alias,
-                     vetted          = EXCLUDED.vetted,
-                     raw             = EXCLUDED.raw,
-                     last_seen       = EXCLUDED.last_seen",
-            &[
-                &federation_id_bytes,
-                &now,
-                &gateway_ids,
-                &node_pub_keys,
-                &api_endpoints,
-                &lightning_aliases,
-                &vetted_flags,
-                &raw_announcements,
-            ],
-        )
-        .await?;
-    }
-
-    dbtx.execute(
-        "WITH current_gateway_ids AS (
-             SELECT UNNEST($3::text[]) AS gateway_id
-         ),
-         all_gateway_ids AS (
-             SELECT gateway_id, TRUE AS is_seen
-             FROM current_gateway_ids
-             UNION
-             SELECT g.gateway_id, FALSE AS is_seen
-             FROM fmo_ln.gateways g
-             WHERE g.federation_id = $1
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM current_gateway_ids c
-                   WHERE c.gateway_id = g.gateway_id
-               )
-         )
-         INSERT INTO fmo_ln.gateway_poll_snapshots
-             (federation_id, gateway_id, poll_time, is_seen)
-         SELECT
-             $1,
-             a.gateway_id,
-             $2,
-             a.is_seen
-         FROM all_gateway_ids a
-         ON CONFLICT DO NOTHING",
-        &[&federation_id_bytes, &now, &gateway_ids],
-    )
-    .await?;
-
-    let prune_interval_secs = GATEWAY_PRUNE_INTERVAL_HOURS * 60 * 60;
-    let should_prune = now.timestamp().rem_euclid(prune_interval_secs)
-        < (GATEWAY_POLL_INTERVAL_MINUTES as i64 * 60);
-    let deleted_snapshots = if should_prune {
-        let retention_cutoff = now - chrono::Duration::days(GATEWAY_SNAPSHOT_RETENTION_DAYS);
-        dbtx.execute(
-            "DELETE FROM fmo_ln.gateway_poll_snapshots
-             WHERE federation_id = $1
-               AND poll_time < $2",
-            &[&federation_id_bytes, &retention_cutoff],
-        )
-        .await?
-    } else {
-        0
-    };
-    dbtx.commit().await?;
-
-    info!(
-        "Stored {} seen gateway(s), persisted poll snapshots for federation {}, deleted {} old snapshots",
-        merged.len(),
-        federation_id,
-        deleted_snapshots
-    );
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

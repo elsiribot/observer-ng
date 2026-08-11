@@ -44,7 +44,7 @@ impl ObserverModule for LnObserver {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn migrations(&self) -> &'static [Migration] {
@@ -223,13 +223,14 @@ impl ObserverModule for LnObserver {
         Ok(serde_json::to_value(ln_ci).ok())
     }
 
-    /// Polls the federation's gateway registry (ported from PR #109).
+    /// Polls the federation's gateway registry (ported from PR #109), on the
+    /// shared `fmo_core::gateway_poll` harness.
     async fn run_federation_task(self: Arc<Self>, ctx: ModuleTaskCtx) {
-        if let Err(e) = gateways::monitor_gateways(ctx.clone()).await {
-            warn!(
-                "Gateway monitor for federation {} exited: {e:?}",
-                ctx.federation_id
-            );
+        let federation_id = ctx.federation_id;
+        if let Err(e) =
+            fmo_core::gateway_poll::run_gateway_poller(ctx, gateways::LnGatewaySource).await
+        {
+            warn!("Gateway monitor for federation {federation_id} exited: {e:?}");
         }
     }
 

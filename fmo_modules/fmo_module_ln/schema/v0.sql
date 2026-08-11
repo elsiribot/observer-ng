@@ -68,6 +68,8 @@ CREATE TABLE gateway_poll_snapshots
     gateway_id    TEXT        NOT NULL,
     poll_time     TIMESTAMPTZ NOT NULL,
     is_seen       BOOLEAN     NOT NULL,
+    reachable     BOOLEAN     NOT NULL DEFAULT FALSE,
+    latency_ms    INTEGER,
     PRIMARY KEY (federation_id, gateway_id, poll_time)
 );
 CREATE INDEX gateway_poll_snapshots_fed_time
