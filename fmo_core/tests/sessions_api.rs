@@ -89,7 +89,7 @@ async fn session_page_and_items() {
     drop(conn);
 
     let registry = ModuleRegistry::new(vec![]);
-    let observer = FederationObserver::new(
+    let observer = FederationObserver::new_without_tasks(
         &std::env::var("FMO_TEST_DATABASE").unwrap(),
         "admin",
         "http://unused.invalid",

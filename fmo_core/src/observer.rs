@@ -33,7 +33,10 @@ pub struct FederationObserver {
 }
 
 impl FederationObserver {
-    pub async fn new(
+    /// Builds the observer without spawning any background tasks — for
+    /// tests (and embedding) that only exercise query methods against a
+    /// pre-seeded database.
+    pub async fn new_without_tasks(
         database: &str,
         admin_auth: &str,
         mempool_url: &str,
@@ -75,6 +78,17 @@ impl FederationObserver {
             task_group: Default::default(),
             consensus_meta_cache: Default::default(),
         };
+
+        Ok(observer)
+    }
+
+    pub async fn new(
+        database: &str,
+        admin_auth: &str,
+        mempool_url: &str,
+        registry: ModuleRegistry,
+    ) -> anyhow::Result<FederationObserver> {
+        let observer = Self::new_without_tasks(database, admin_auth, mempool_url, registry).await?;
 
         observer.seed_block_times().await?;
 
