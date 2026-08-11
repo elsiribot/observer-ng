@@ -1,4 +1,5 @@
 mod gateways;
+pub mod status;
 
 use std::sync::Arc;
 
@@ -25,6 +26,13 @@ pub struct LnObserver;
 
 const KIND: ModuleKind = ModuleKind::from_static_str("ln");
 
+/// Preimage-decryption threshold `n - (n-1)/3` for a federation's guardian
+/// count `n`, taken from the number of configured API endpoints.
+fn decryption_threshold(config: &fedimint_core::config::ClientConfig) -> i64 {
+    let n = config.global.api_endpoints.len() as i64;
+    n - (n - 1) / 3
+}
+
 #[async_trait::async_trait]
 impl ObserverModule for LnObserver {
     fn kind(&self) -> ModuleKind {
@@ -36,7 +44,7 @@ impl ObserverModule for LnObserver {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn migrations(&self) -> &'static [Migration] {
@@ -79,6 +87,15 @@ impl ObserverModule for LnObserver {
                 ],
             )
             .await?;
+
+        let threshold = decryption_threshold(&ctx.config);
+        crate::status::recompute_contract_status(
+            ctx.dbtx,
+            &meta.federation_id.consensus_encode_to_vec(),
+            &input_v0.contract_id.consensus_encode_to_vec(),
+            threshold,
+        )
+        .await?;
 
         Ok(ProcessedItem {
             amount: Some(input_v0.amount),
@@ -149,6 +166,15 @@ impl ObserverModule for LnObserver {
             )
             .await?;
 
+        let threshold = decryption_threshold(&ctx.config);
+        crate::status::recompute_contract_status(
+            ctx.dbtx,
+            &meta.federation_id.consensus_encode_to_vec(),
+            &contract_id.consensus_encode_to_vec(),
+            threshold,
+        )
+        .await?;
+
         Ok(ProcessedItem {
             amount: Some(amount),
             details: serde_json::to_value(ln_output).ok(),
@@ -183,6 +209,15 @@ impl ObserverModule for LnObserver {
                     ],
                 )
                 .await?;
+
+            let threshold = decryption_threshold(&ctx.config);
+            crate::status::recompute_contract_status(
+                ctx.dbtx,
+                &meta.federation_id.consensus_encode_to_vec(),
+                &contract_id.consensus_encode_to_vec(),
+                threshold,
+            )
+            .await?;
         }
 
         Ok(serde_json::to_value(ln_ci).ok())

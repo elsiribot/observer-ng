@@ -4,6 +4,8 @@ CREATE TABLE contracts
     contract_id   BYTEA NOT NULL,
     type          TEXT  NOT NULL CHECK (type IN ('incoming', 'outgoing')),
     payment_hash  BYTEA NOT NULL,
+    status        TEXT  NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'decrypted', 'succeeded', 'refunded')),
     PRIMARY KEY (federation_id, contract_id)
 );
 CREATE INDEX ln_contract_federation_contract ON contracts (federation_id, contract_id);
