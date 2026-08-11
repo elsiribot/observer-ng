@@ -52,8 +52,12 @@ A polished, public-facing explorer for a federation's raw consensus, in three li
   fedimint tx resolves to its user tx via `user_transaction_txs` by txid, and a user tx lists its
   member txs via the by-user-key index.
 - **Current API is thin**: session list returns only `{session_index: {transactions: n}}`, no
-  timestamps or per-module counts; the transaction list has **no pagination**; there is **no
-  consensus-item endpoint** and **no gold-layer endpoint**.
+  timestamps or per-module counts — and it computes those tx counts with an **unbounded**
+  `LEFT JOIN transactions … GROUP BY session_index` over *all* sessions (no pagination), which is
+  O(all sessions) per call (271k+ on a busy federation). The transaction list also has **no
+  pagination**; there is **no consensus-item endpoint** and **no gold-layer endpoint**.
+- **Sessions are immutable once ingested** — a finalized session's items never change — so any
+  per-session aggregate can be computed exactly once and read back O(1).
 - **Frontend** (`fmo_frontend_react`): per-federation `FederationDetail` page already uses a tab
   pattern (`activity | utxos | config`) and a `Tabs` component; routes are `/`, `/nostr`,
   `/federations/:id`. Central `api.ts` funnels all calls (now bearer-auth-aware from SP‑bearer work).
@@ -71,6 +75,10 @@ A polished, public-facing explorer for a federation's raw consensus, in three li
 4. **Gold-layer drill-in.** Fedimint tx → its user transaction → all member fedimint txs. Exposes
    `user_transactions`/`user_transaction_txs` read-only via API.
 5. **Full UI now** (not API-only), on `FederationDetail` tabs + deep-linkable detail routes.
+6. **Precomputed per-session stats.** A core `session_stats` table holds each session's `tx_count`
+   and per-kind consensus-item counts, written once at ingest (immutable thereafter). The session
+   list reads it directly — O(1) per row, keyset-paginated — instead of grouped counts or the
+   current unbounded join.
 
 ## Architecture
 
@@ -94,11 +102,23 @@ kind). Transactions: reuse/extend `transaction_details` to return decoded inputs
 module-kind labels; join `user_transaction_txs` to include the item's `user_tx_key` so the UI links
 to the gold layer without a second call.
 
+**Precomputed session stats.** A new core table `session_stats(federation_id, session_index,
+tx_count INT, ci_count INT, items_by_kind JSONB)`, PK `(federation_id, session_index)`, FK to
+`sessions`. Populated **at ingest**: `ingest_session` already iterates a session's items, so it
+tallies `tx_count` and the per-kind CI counts in Rust and `INSERT … ON CONFLICT DO NOTHING`
+(idempotent for crash-resume/replay). Because sessions are immutable, the row is written once and
+never updated. Pre-existing sessions are filled by a **one-time background backfill** (a batched
+`INSERT INTO session_stats SELECT … GROUP BY session_index` over `transactions`+`consensus_items`,
+by session range, resumable via a cursor — analogous to a lightweight replay, not a blocking
+migration). The `GET /sessions` list then reads `session_stats` directly (keyset by
+`session_index`), and `items_by_kind` is served straight from the JSONB — no per-page grouped
+counts, and the current unbounded tx-count join is removed.
+
 ## API (new/extended, all under `/federations/:id`)
 
 - `GET /sessions?before=<session_index>&limit=N` — keyset-paginated session list; each row
-  `{session_index, estimated_time, tx_count, items_by_kind:{ln:3,wallet:2,…}, next_cursor}`.
-  `items_by_kind` is a ranged grouped count over just the page's sessions (indexed range scan).
+  `{session_index, estimated_time, tx_count, items_by_kind:{ln:3,wallet:2,…}, next_cursor}`, read
+  directly from `session_stats` joined to `session_times` (no grouped counts at request time).
 - `GET /sessions/:idx` — one session's ordered items: `[{item_index, type:'transaction'|'ci',
   kind, peer_id?, summary, txid?, user_tx_key?}]` (tx items carry `txid`+`user_tx_key`; CI items
   carry `kind`+`peer_id`+`details`).
@@ -141,11 +161,13 @@ the theme; new pieces are the item-list component, the renderer registry, and th
 ## Performance & Testing
 
 - Keyset pagination end-to-end; the two new composite indexes above make the filtered streams cheap
-  on the 127M-row table. `items_by_kind` is bounded to a page of sessions.
-- **Backend tests** (DB-gated, existing harness): session list shape + `items_by_kind`; session
-  item union ordering; consensus keyset pagination + each filter (transaction / kind / all) incl.
-  cursor correctness; tx detail `user_tx_key` join; user-tx assembly (summary + member roles). Seed
-  via SQL like the gold tests.
+  on the 127M-row table. The session list reads precomputed `session_stats` (O(1) per row), so it
+  does no counting at request time.
+- **Backend tests** (DB-gated, existing harness): `session_stats` populated correctly at ingest
+  (tx_count + items_by_kind) and idempotent on re-ingest; the backfill fills a pre-existing session;
+  session list shape reads from `session_stats`; session item union ordering; consensus keyset
+  pagination + each filter (transaction / kind / all) incl. cursor correctness; tx detail
+  `user_tx_key` join; user-tx assembly (summary + member roles). Seed via SQL like the gold tests.
 - **Frontend tests** (vitest + testing-library, from SP‑bearer): the item-list component
   (pagination/scroll, filter switching), the renderer registry (a rich-tx render, a functional-CI
   render, the raw-JSON fallback), and the user-tx page (member-tx list + links).
@@ -160,6 +182,8 @@ the theme; new pieces are the item-list component, the renderer registry, and th
 - Public-ready but **deployed to the private instance only** for now; nothing about the design may
   assume private-only (it must be safe to ship publicly later).
 - Core schema additions are append-only migrations; module schemas untouched (this is core + FE).
+- `session_stats` is written once at ingest and never mutated (sessions are immutable); its ingest
+  population must be idempotent (`ON CONFLICT DO NOTHING`) so crash-resume and replay are safe.
 - Work stays on the `modularization` branch; no PR, nothing pushed.
 
 ## Out of Scope / Non-Goals
