@@ -10,6 +10,8 @@ use fedimint_lnv2_common::{
 use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use tracing::warn;
 
+pub mod status;
+
 /// Observer module for the next-generation fedimint `lnv2` lightning module:
 /// tracks incoming/outgoing contracts and contributes the module's unix time
 /// votes to the core session time estimation.
@@ -28,7 +30,7 @@ impl ObserverModule for LnV2Observer {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn migrations(&self) -> &'static [Migration] {
@@ -56,19 +58,29 @@ impl ObserverModule for LnV2Observer {
             });
         };
 
-        let (contract_type, outpoint) = match input_v0 {
-            LightningInputV0::Outgoing(outpoint, _witness) => ("outgoing", outpoint),
-            LightningInputV0::Incoming(outpoint, _agg_decryption_key) => ("incoming", outpoint),
+        use fedimint_lnv2_common::OutgoingWitness;
+        let (contract_type, variant, outpoint) = match input_v0 {
+            LightningInputV0::Outgoing(outpoint, witness) => {
+                let variant = match witness {
+                    OutgoingWitness::Claim(_) => "claim",
+                    OutgoingWitness::Refund | OutgoingWitness::Cancel(_) => "refund",
+                };
+                ("outgoing", variant, outpoint)
+            }
+            LightningInputV0::Incoming(outpoint, _agg_decryption_key) => {
+                ("incoming", "claim", outpoint)
+            }
         };
 
         ctx.dbtx
             .execute(
-                "INSERT INTO input_outpoints VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                "INSERT INTO input_outpoints VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
                 &[
                     &meta.federation_id.consensus_encode_to_vec(),
                     &meta.txid.consensus_encode_to_vec(),
                     &(meta.index as i32),
                     &contract_type,
+                    &variant,
                     &outpoint.txid.consensus_encode_to_vec(),
                     &(outpoint.out_idx as i32),
                 ],
@@ -93,6 +105,13 @@ impl ObserverModule for LnV2Observer {
             )
             .await?
             .map(|row| Amount::from_msats(row.get::<_, i64>(0) as u64));
+
+        crate::status::recompute_contract_status(
+            ctx.dbtx,
+            &meta.federation_id.consensus_encode_to_vec(),
+            &outpoint.txid.consensus_encode_to_vec(),
+        )
+        .await?;
 
         let details = serde_json::to_value(lnv2_input).ok().map(|mut value| {
             if amount.is_some() {

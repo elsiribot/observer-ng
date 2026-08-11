@@ -2297,6 +2297,7 @@ dependencies = [
  "fmo_core",
  "serde_json",
  "tokio",
+ "tokio-postgres",
  "tracing",
 ]
 

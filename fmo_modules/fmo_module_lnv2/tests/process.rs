@@ -11,6 +11,7 @@ use fedimint_lnv2_common::{
 };
 use fmo_core::module::{CiMeta, ItemMeta, ObserverModule, ProcessCtx};
 use fmo_core::test_util::{insert_federation, minimal_config, reset_db, test_pool, test_services};
+use fmo_module_lnv2::status::recompute_contract_status;
 use fmo_module_lnv2::LnV2Observer;
 
 fn test_pk() -> PublicKey {
@@ -18,13 +19,31 @@ fn test_pk() -> PublicKey {
         .unwrap()
 }
 
+/// These tests share one database; serialize them (the single-test module
+/// crates don't need this, but this file has two).
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `reset_db` only resets `public`; drop the module schema too so each test
+/// applies the current `fmo_lnv2` schema from scratch (guards against a stale
+/// leftover version in a shared dev database).
+async fn reset_lnv2(pool: &deadpool_postgres::Pool) {
+    reset_db(pool).await;
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("DROP SCHEMA IF EXISTS fmo_lnv2 CASCADE")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn lnv2_output_records_contract_and_time_vote_feeds_session_times() {
+    let _guard = DB_LOCK.lock().await;
     let Some(pool) = test_pool() else {
         eprintln!("skipping: FMO_TEST_DATABASE unset");
         return;
     };
-    reset_db(&pool).await;
+    reset_lnv2(&pool).await;
     let (config, federation_id) = minimal_config();
     insert_federation(&pool, &config, federation_id).await;
     let services = test_services(&pool);
@@ -179,4 +198,120 @@ async fn lnv2_output_records_contract_and_time_vote_feeds_session_times() {
     };
     assert_eq!(time_votes, 1);
     assert_eq!(epoch as i64, 1_700_000_000);
+}
+
+#[tokio::test]
+async fn lnv2_status_transitions() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_lnv2(&pool).await;
+    let (config, federation_id) = minimal_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let module = LnV2Observer;
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "lnv2",
+        module.version(),
+        module.migrations(),
+    )
+    .await
+    .unwrap();
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // helpers
+    async fn seed_fk(pool: &deadpool_postgres::Pool, fed: &[u8], n: u8) -> Vec<u8> {
+        let txid = vec![n; 32];
+        let conn = pool.get().await.unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ($1,$2,''::bytea) ON CONFLICT DO NOTHING",
+            &[&fed, &(n as i32)],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transactions VALUES ($1,$2,$3,0,''::bytea) ON CONFLICT DO NOTHING",
+            &[&fed, &txid, &(n as i32)],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO transaction_inputs (federation_id,txid,in_index,kind) VALUES ($1,$2,0,'lnv2') ON CONFLICT DO NOTHING", &[&fed,&txid]).await.unwrap();
+        conn.execute("INSERT INTO transaction_outputs (federation_id,txid,out_index,kind) VALUES ($1,$2,0,'lnv2') ON CONFLICT DO NOTHING", &[&fed,&txid]).await.unwrap();
+        txid
+    }
+    async fn insert_contract(
+        pool: &deadpool_postgres::Pool,
+        fed: &[u8],
+        cid: &[u8],
+        typ: &str,
+        txid: &[u8],
+    ) {
+        pool.get().await.unwrap().execute(
+            "INSERT INTO fmo_lnv2.contracts (federation_id,contract_id,type,amount_msat,txid,out_index) VALUES ($1,$2,$3,1000,$4,0)",
+            &[&fed,&cid,&typ,&txid]).await.unwrap();
+    }
+    async fn insert_input(
+        pool: &deadpool_postgres::Pool,
+        fed: &[u8],
+        txid: &[u8],
+        typ: &str,
+        variant: &str,
+        outpoint_txid: &[u8],
+    ) {
+        pool.get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO fmo_lnv2.input_outpoints VALUES ($1,$2,0,$3,$4,$5,0)",
+                &[&fed, &txid, &typ, &variant, &outpoint_txid],
+            )
+            .await
+            .unwrap();
+    }
+    async fn status_of(pool: &deadpool_postgres::Pool, fed: &[u8], cid: &[u8]) -> String {
+        pool.get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT status FROM fmo_lnv2.contracts WHERE federation_id=$1 AND contract_id=$2",
+                &[&fed, &cid],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+    async fn recompute(pool: &deadpool_postgres::Pool, fed: &[u8], outpoint_txid: &[u8]) {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        dbtx.batch_execute("SET LOCAL search_path TO fmo_lnv2, public")
+            .await
+            .unwrap();
+        recompute_contract_status(&dbtx, fed, outpoint_txid)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    // funded only -> pending
+    let cf = vec![1u8; 32];
+    let tf = seed_fk(&pool, &fed, 1).await;
+    insert_contract(&pool, &fed, &cf, "outgoing", &tf).await;
+    recompute(&pool, &fed, &tf).await;
+    assert_eq!(status_of(&pool, &fed, &cf).await, "pending");
+    // claim -> succeeded
+    let tclaim = seed_fk(&pool, &fed, 2).await;
+    insert_input(&pool, &fed, &tclaim, "outgoing", "claim", &tf).await;
+    recompute(&pool, &fed, &tf).await;
+    assert_eq!(status_of(&pool, &fed, &cf).await, "succeeded");
+
+    // second contract, refund -> refunded
+    let cr = vec![3u8; 32];
+    let tr = seed_fk(&pool, &fed, 3).await;
+    insert_contract(&pool, &fed, &cr, "outgoing", &tr).await;
+    let trefund = seed_fk(&pool, &fed, 4).await;
+    insert_input(&pool, &fed, &trefund, "outgoing", "refund", &tr).await;
+    recompute(&pool, &fed, &tr).await;
+    assert_eq!(status_of(&pool, &fed, &cr).await, "refunded");
 }

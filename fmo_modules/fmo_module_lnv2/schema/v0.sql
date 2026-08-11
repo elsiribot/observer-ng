@@ -6,6 +6,8 @@ CREATE TABLE contracts
     amount_msat   BIGINT  NOT NULL,
     txid          BYTEA   NOT NULL,
     out_index     INTEGER NOT NULL,
+    status        TEXT    NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'succeeded', 'refunded')),
     PRIMARY KEY (federation_id, contract_id)
 );
 CREATE INDEX lnv2_contracts_federation ON contracts (federation_id);
@@ -18,6 +20,7 @@ CREATE TABLE input_outpoints
     txid               BYTEA   NOT NULL,
     in_index           INTEGER NOT NULL,
     type               TEXT    NOT NULL CHECK (type IN ('incoming', 'outgoing')),
+    variant            TEXT    NOT NULL CHECK (variant IN ('claim', 'refund')),
     outpoint_txid      BYTEA   NOT NULL,
     outpoint_out_index INTEGER NOT NULL,
     PRIMARY KEY (federation_id, txid, in_index),
