@@ -8,6 +8,7 @@ import { Alert } from '../components/Alert';
 import { Copyable } from '../components/Copyable';
 import { SessionsTab } from '../components/explorer/SessionsTab';
 import { ConsensusTab } from '../components/explorer/ConsensusTab';
+import { ExplorerSearch } from '../components/explorer/ExplorerSearch';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
@@ -510,6 +511,12 @@ export function FederationDetail() {
           </div>
         </div>
       </div>
+
+      {id && (
+        <div className="mt-4 sm:mt-6">
+          <ExplorerSearch federationId={id} />
+        </div>
+      )}
 
       {/* Tabs Section (Activity, UTXOs, Config) */}
       <div className="mt-4 sm:mt-6">
