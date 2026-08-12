@@ -4,7 +4,7 @@
  * components below. That mix is intentional here (it's a renderer registry,
  * not a page), so Fast Refresh boundary purity doesn't apply. */
 import { useState } from 'react';
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Badge, type BadgeLevel } from '../Badge';
 import { api } from '../../services/api';
@@ -31,6 +31,72 @@ export function shorten(hex: string, chars = 8): string {
     return hex;
   }
   return `${hex.slice(0, chars)}…${hex.slice(-chars)}`;
+}
+
+// Compact icon-only copy-to-clipboard button, for placing inline next to a
+// hash/id without disrupting row layout (unlike `Copyable`, which pairs an
+// input field with the button). Mirrors `Copyable`'s copied-state + icons.
+export function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      console.error('Failed to copy text:', err);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      className="shrink-0 inline-flex items-center text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
+      aria-label={copied ? 'Copied!' : 'Copy'}
+      title={copied ? 'Copied!' : 'Copy'}
+    >
+      {copied ? (
+        <svg
+          className="w-3.5 h-3.5 text-green-600 dark:text-green-400"
+          aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg"
+          width="24"
+          height="24"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2.3"
+            d="M5 11.917 9.724 16.5 19 7.5"
+          />
+        </svg>
+      ) : (
+        <svg
+          className="w-3.5 h-3.5"
+          aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg"
+          width="24"
+          height="24"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke="currentColor"
+            strokeLinejoin="round"
+            strokeWidth="2.3"
+            d="M9 8v3a1 1 0 0 1-1 1H5m11 4h2a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v1m4 3v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-7.13a1 1 0 0 1 .24-.65L7.7 8.35A1 1 0 0 1 8.46 8H13a1 1 0 0 1 1 1Z"
+          />
+        </svg>
+      )}
+    </button>
+  );
 }
 
 // ---- Transaction row -------------------------------------------------
@@ -124,19 +190,23 @@ function TransactionRow({ item }: { item: SessionItem }) {
           <span className="text-xs text-gray-500 dark:text-gray-400 capitalize">{direction}</span>
         )}
         {item.txid && federationId ? (
-          <Link
-            to={`/federations/${federationId}/tx/${item.txid}`}
-            className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline truncate"
-            title={item.txid}
-          >
-            {shorten(item.txid)}
-          </Link>
+          <span className="inline-flex items-center gap-1 min-w-0">
+            <Link
+              to={`/federations/${federationId}/tx/${item.txid}`}
+              className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline truncate"
+              title={item.txid}
+            >
+              {shorten(item.txid)}
+            </Link>
+            <CopyButton text={item.txid} />
+          </span>
         ) : (
           <span
-            className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate"
+            className="inline-flex items-center gap-1 min-w-0 font-mono text-xs text-gray-700 dark:text-gray-300 truncate"
             title={item.txid ?? undefined}
           >
             {item.txid ? shorten(item.txid) : 'unknown txid'}
+            {item.txid && <CopyButton text={item.txid} />}
           </span>
         )}
         {item.user_tx_key && federationId && (
@@ -402,7 +472,11 @@ function renderLn(details: unknown): ReactNode | null {
       if (typeof contractId !== 'string') return null;
       return (
         <>
-          Preimage decryption share for contract <ContractLink id={contractId} />
+          Preimage decryption share for contract{' '}
+          <span className="inline-flex items-center gap-1">
+            <ContractLink id={contractId} />
+            <CopyButton text={contractId} />
+          </span>
         </>
       );
     }

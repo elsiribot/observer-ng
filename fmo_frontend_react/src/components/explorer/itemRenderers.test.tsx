@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { renderItem, TxDetailBody } from './itemRenderers';
 import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
@@ -154,6 +154,27 @@ describe('renderItem', () => {
         details: { BlockCount: 'not-a-number' },
       })
     ).not.toThrow();
+  });
+});
+
+describe('CopyButton', () => {
+  it('copies the full txid to the clipboard when clicked', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      writable: true,
+      configurable: true,
+    });
+
+    renderWithRouter({
+      ...baseItem,
+      item_type: 'transaction',
+      txid: 'abc123txiddeadbeefreallylongtxid',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /copy/i }));
+
+    expect(writeText).toHaveBeenCalledWith('abc123txiddeadbeefreallylongtxid');
   });
 });
 
