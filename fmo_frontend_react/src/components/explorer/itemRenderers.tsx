@@ -24,7 +24,9 @@ export function renderItem(item: SessionItem): ReactNode {
   return <ConsensusItemRow item={item} />;
 }
 
-function shorten(hex: string, chars = 8): string {
+// Exported so `TransactionDetail`/`UserTransaction` pages can render the
+// same shortened hex + classification badge for consistency.
+export function shorten(hex: string, chars = 8): string {
   if (hex.length <= chars * 2 + 1) {
     return hex;
   }
@@ -51,7 +53,9 @@ const USER_TX_KIND_LABELS: Record<string, { label: string; level: BadgeLevel }> 
   stability_pool: { label: 'Stability Pool', level: 'success' },
 };
 
-function classificationBadge(userTxKind: string | null): { label: string; level: BadgeLevel } {
+export function classificationBadge(
+  userTxKind: string | null
+): { label: string; level: BadgeLevel } {
   if (userTxKind && userTxKind in USER_TX_KIND_LABELS) {
     return USER_TX_KIND_LABELS[userTxKind];
   }
@@ -104,12 +108,22 @@ function TransactionRow({ item }: { item: SessionItem }) {
         {direction && (
           <span className="text-xs text-gray-500 dark:text-gray-400 capitalize">{direction}</span>
         )}
-        <span
-          className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate"
-          title={item.txid ?? undefined}
-        >
-          {item.txid ? shorten(item.txid) : 'unknown txid'}
-        </span>
+        {item.txid && federationId ? (
+          <Link
+            to={`/federations/${federationId}/tx/${item.txid}`}
+            className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline truncate"
+            title={item.txid}
+          >
+            {shorten(item.txid)}
+          </Link>
+        ) : (
+          <span
+            className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate"
+            title={item.txid ?? undefined}
+          >
+            {item.txid ? shorten(item.txid) : 'unknown txid'}
+          </span>
+        )}
         {item.user_tx_key && federationId && (
           <Link
             to={`/federations/${federationId}/user-transactions/${item.user_tx_key}`}
