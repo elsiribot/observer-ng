@@ -25,6 +25,7 @@ const baseItem: SessionItem = {
   user_tx_kind: null,
   direction: null,
   details: null,
+  estimated_time: null,
 };
 
 describe('renderItem', () => {

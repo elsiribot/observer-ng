@@ -160,6 +160,9 @@ pub struct SessionItem {
     /// `None` alongside `user_tx_kind`.
     pub direction: Option<String>,
     pub details: Option<serde_json::Value>,
+    /// The item's session's estimated wall-clock time (epoch seconds), from
+    /// `session_times`; `None` if the session has no time vote yet.
+    pub estimated_time: Option<i64>,
 }
 
 /// A keyset-paginated page of the federation-wide consensus item stream.

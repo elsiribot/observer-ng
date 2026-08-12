@@ -43,6 +43,7 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     user_tx_kind: null,
     direction: null,
     details: null,
+    estimated_time: null,
     ...overrides,
   };
 }

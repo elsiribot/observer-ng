@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { SessionItem } from '../../types/api';
+import { formatTimestamp, timeAgo } from '../../utils/format';
 import { Alert } from '../Alert';
 import { renderItem } from './itemRenderers';
 
@@ -72,7 +73,18 @@ export function ItemList({
                   className="flex items-center gap-2 pt-3 pb-1 text-xs font-mono text-gray-400 dark:text-gray-500"
                   aria-label={`Session ${item.session_index}`}
                 >
-                  <span className="shrink-0">Session {item.session_index}</span>
+                  <span className="shrink-0">
+                    Session {item.session_index}
+                    {item.estimated_time !== null && (
+                      <>
+                        {' · '}
+                        {formatTimestamp(item.estimated_time)}{' '}
+                        <span className="text-gray-300 dark:text-gray-600">
+                          ({timeAgo(item.estimated_time)})
+                        </span>
+                      </>
+                    )}
+                  </span>
                   <span className="flex-1 border-t border-gray-300 dark:border-gray-600" />
                 </div>
               )}

@@ -74,6 +74,20 @@ async fn consensus_stream_filters_and_paging() {
     )
     .await
     .unwrap();
+
+    // Only session 1 gets a time vote: session 0 (before any vote) stays
+    // NULL, session 1 gets it directly, session 2 (after) forward-fills from
+    // it. Exercises both the populated and NULL `estimated_time` cases.
+    conn.execute(
+        "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+         VALUES ($1, 1, 'wallet', 0, '2024-01-15 12:05:00')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+        .await
+        .unwrap();
     drop(conn);
 
     let registry = ModuleRegistry::new(vec![]);
@@ -119,6 +133,12 @@ async fn consensus_stream_filters_and_paging() {
     assert!(page1.items[2].user_tx_kind.is_none());
     assert!(page1.items[2].direction.is_none());
     assert_eq!(page1.next, Some((1, 0)));
+    // session 2's item[0] (tx_c) forward-fills the estimated_time from
+    // session 1's vote; session 1's items[1]/[2] carry it directly.
+    assert!(page1.items[0].estimated_time.is_some());
+    assert!(page1.items[1].estimated_time.is_some());
+    assert!(page1.items[2].estimated_time.is_some());
+    assert_eq!(page1.items[1].estimated_time, page1.items[2].estimated_time);
 
     // --- filter=all, page 2: remaining 2 items, using the returned cursor ---
     let page2 = observer
@@ -136,6 +156,10 @@ async fn consensus_stream_filters_and_paging() {
     );
     // Fewer than `limit` returned -> no more pages.
     assert_eq!(page2.next, None);
+    // session 0 has no vote and no earlier session to forward-fill from:
+    // estimated_time is None.
+    assert!(page2.items[0].estimated_time.is_none());
+    assert!(page2.items[1].estimated_time.is_none());
 
     // No overlap/gap between page1 and page2: union is exactly all 5 items.
     let mut all_keys: Vec<(i64, i64)> = page1

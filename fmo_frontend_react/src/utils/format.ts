@@ -32,6 +32,31 @@ export function formatTimestamp(unixSeconds: number | null): string {
   return new Date(unixSeconds * 1000).toLocaleString();
 }
 
+// Format a unix-epoch-seconds timestamp as a compact relative age (e.g. for
+// the consensus explorer's session dividers). '' when unavailable.
+export function timeAgo(unixSeconds: number | null): string {
+  if (unixSeconds === null) {
+    return '';
+  }
+  const diffSeconds = Math.max(0, Math.round(Date.now() / 1000 - unixSeconds));
+  if (diffSeconds < 30) {
+    return 'just now';
+  }
+  if (diffSeconds < 60) {
+    return `${diffSeconds}s ago`;
+  }
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
 // Calculate rating index for sorting
 export function ratingIndex(count: number, avg: number | null): number {
   return (avg || 0) * Math.log10((count || 0) + 1);

@@ -78,6 +78,9 @@ export interface SessionItem {
   /** "in" | "out" | "internal", null alongside `user_tx_kind`. */
   direction: string | null;
   details: Record<string, unknown> | null;
+  /** The item's session's estimated wall-clock time (unix epoch seconds),
+   * or null if the session has no time vote yet. */
+  estimated_time: number | null;
 }
 
 /// A keyset-paginated page of the federation-wide consensus item stream.

@@ -101,6 +101,7 @@ pub(super) struct ConsensusItemRow {
     user_tx_kind: Option<String>,
     direction: Option<String>,
     details: Option<serde_json::Value>,
+    estimated_time: Option<i64>,
 }
 
 impl From<ConsensusItemRow> for SessionItem {
@@ -116,6 +117,7 @@ impl From<ConsensusItemRow> for SessionItem {
             user_tx_kind: row.user_tx_kind,
             direction: row.direction,
             details: row.details,
+            estimated_time: row.estimated_time,
         }
     }
 }
@@ -133,9 +135,11 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
            NULL::text AS kind, NULL::int AS peer_id,
            encode(t.txid,'hex') AS txid,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
-           NULL::jsonb AS details
+           NULL::jsonb AS details,
+           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
     FROM transactions t
     {USER_TX_LATERAL}
+    LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
     WHERE t.federation_id = $1
       AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
     ORDER BY t.session_index DESC, t.item_index DESC
@@ -156,23 +160,27 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
 static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details, estimated_time
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
-                 NULL::jsonb AS details
+                 NULL::jsonb AS details,
+                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
           FROM transactions t
           {USER_TX_LATERAL}
+          LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
           WHERE t.federation_id = $1
             AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
           ORDER BY t.session_index DESC, t.item_index DESC
           LIMIT $4 )
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-                 NULL, NULL, NULL, NULL, ci.details
+                 NULL, NULL, NULL, NULL, ci.details,
+                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
           FROM consensus_items ci
+          LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
           WHERE ci.federation_id = $1
             AND ($2::int IS NULL OR (ci.session_index, ci.item_index) < ($2::int, $3::int))
           ORDER BY ci.session_index DESC, ci.item_index DESC
@@ -188,8 +196,10 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
 const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
            NULL::text AS txid, NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
-           ci.details
+           ci.details,
+           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
     FROM consensus_items ci
+    LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
     WHERE ci.federation_id = $1 AND ci.kind = $2
       AND ($3::int IS NULL OR (ci.session_index, ci.item_index) < ($3::int, $4::int))
     ORDER BY ci.session_index DESC, ci.item_index DESC

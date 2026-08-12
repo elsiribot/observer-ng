@@ -24,6 +24,7 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     user_tx_kind: null,
     direction: null,
     details: null,
+    estimated_time: null,
     ...overrides,
   };
 }
@@ -71,5 +72,14 @@ describe('ItemList', () => {
     expect(screen.queryByText(/^Session \d+$/)).not.toBeInTheDocument();
     // The per-item index is still shown.
     expect(screen.getByText('12.0')).toBeInTheDocument();
+  });
+
+  it('shows the estimated time and age on the divider when the session has one', () => {
+    renderList(
+      [makeItem({ session_index: 12, item_index: 0, estimated_time: Math.floor(Date.now() / 1000) - 120 })],
+      'consensus'
+    );
+    const divider = screen.getByLabelText('Session 12');
+    expect(divider.textContent).toMatch(/Session 12 · .+\(2m ago\)/);
   });
 });
