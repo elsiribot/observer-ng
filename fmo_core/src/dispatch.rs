@@ -7,7 +7,7 @@ use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::core::ModuleKind;
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::epoch::ConsensusItem;
-use fedimint_core::session_outcome::SessionOutcome;
+use fedimint_core::session_outcome::{AcceptedItem, SessionOutcome};
 use futures::StreamExt;
 use tracing::{debug, warn};
 
@@ -222,14 +222,15 @@ async fn process_module_batch(
     let mut last_session_index = None;
     for (session_index, session) in pending {
         if session_touches_module(config, &kind, session) {
-            dispatch_session_to_module(
+            dispatch_items_to_module(
                 &dbtx,
                 module,
                 services,
                 federation_id,
                 config,
                 *session_index as u64,
-                session,
+                &session.items,
+                0,
             )
             .await?;
         }
@@ -271,15 +272,25 @@ async fn process_module_single(
     Ok(())
 }
 
+/// Decodes and dispatches `items[start..]` of a session to `module`,
+/// writing amounts/details back into the core structural tables. Absolute
+/// `item_index` is `start + rel`, matching what [`ingest::ingest_items`]
+/// used for the same items.
+///
+/// Live processing and historical replay are the same code path: replay
+/// (via [`process_module_batch`]) calls this with `start = 0` over a whole
+/// session's items; the live poller (a later task) will call it
+/// incrementally as new items arrive.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_session_to_module(
+pub async fn dispatch_items_to_module(
     dbtx: &Transaction<'_>,
     module: &dyn ObserverModule,
     services: &Arc<CoreServices>,
     federation_id: FederationId,
     config: &ClientConfig,
     session_index: u64,
-    session: &SessionOutcome,
+    items: &[AcceptedItem],
+    start: usize,
 ) -> anyhow::Result<()> {
     let module_kind = module.kind();
     let federation_id_bytes = federation_id.consensus_encode_to_vec();
@@ -315,7 +326,8 @@ async fn dispatch_session_to_module(
         )
         .await?;
 
-    for (item_index, accepted_item) in session.items.iter().enumerate() {
+    for (rel, accepted_item) in items[start..].iter().enumerate() {
+        let item_index = start + rel;
         match &accepted_item.item {
             ConsensusItem::Transaction(transaction) => {
                 let txid = transaction.tx_hash();
