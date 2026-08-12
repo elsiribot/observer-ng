@@ -57,8 +57,8 @@ pub(super) async fn transaction_detail(
 pub(super) async fn transaction_histogram(
     Path(federation_id): Path<FederationId>,
     State(state): State<AppState>,
-) -> crate::error::Result<Json<BTreeMap<NaiveDate, FederationActivity>>> {
-    Ok(state
+) -> crate::error::Result<impl axum::response::IntoResponse> {
+    let histogram = state
         .observer
         .transaction_histogram(federation_id)
         .await?
@@ -72,8 +72,12 @@ pub(super) async fn transaction_histogram(
                 },
             )
         })
-        .collect::<BTreeMap<_, _>>()
-        .into())
+        .collect::<BTreeMap<_, _>>();
+
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "public, max-age=30")],
+        Json(histogram),
+    ))
 }
 
 impl FederationObserver {
@@ -211,6 +215,7 @@ impl FederationObserver {
                          txid,
                          SUM(amount_msat) AS total_input_amount
                   FROM transaction_inputs
+                  WHERE federation_id = $1
                   GROUP BY txid, federation_id) ti ON t.txid = ti.txid AND t.federation_id = ti.federation_id
             WHERE t.federation_id = $1
             GROUP BY date
@@ -236,7 +241,7 @@ impl FederationObserver {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct HistogramEntry {
-    date: NaiveDate,
-    count: i64,
-    amount: i64,
+    pub date: NaiveDate,
+    pub count: i64,
+    pub amount: i64,
 }

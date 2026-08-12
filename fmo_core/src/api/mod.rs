@@ -173,6 +173,14 @@ impl FederationObserver {
                 .await?;
         }
 
+        // Refresh the `/federations/totals` cache. Best-effort: a failure
+        // here shouldn't abort the matview refresh cycle, since the totals
+        // handler falls back to computing on demand if the cache is empty.
+        match self.compute_totals().await {
+            Ok(totals) => *self.cached_totals().write().await = Some(totals),
+            Err(e) => debug!("Error while refreshing cached totals: {e:?}"),
+        }
+
         Ok(())
     }
 }

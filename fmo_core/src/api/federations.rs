@@ -1,5 +1,7 @@
 use anyhow::Context;
 use axum::extract::{Path, State};
+use axum::http::header::CACHE_CONTROL;
+use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_auth::AuthBearer;
@@ -19,6 +21,11 @@ use crate::observer::FederationObserver;
 use crate::query::{query, query_one, query_value};
 use crate::services::meta::{config_to_json, MetaFieldsExt};
 
+/// Header applied to the fleet/totals/histogram/summary endpoints, which are
+/// hammered by the two hottest pages (home + federation detail) but only
+/// need up-to-`FO_REFRESH_INTERVAL_SECS`-fresh data.
+const HOT_CACHE_CONTROL: &str = "public, max-age=30";
+
 pub fn get_federations_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_observed_federations))
@@ -27,6 +34,7 @@ pub fn get_federations_routes() -> Router<AppState> {
         // TODO: move to nostr module
         .route("/nostr/rating", put(publish_rating_event))
         .route("/:federation_id", get(get_federation_overview))
+        .route("/:federation_id/summary", get(get_federation_summary))
         .route("/:federation_id/config", get(get_federation_config))
         .route("/:federation_id/meta", get(get_federation_meta))
         .route("/:federation_id/health", get(get_federation_health))
@@ -72,8 +80,17 @@ pub fn get_federations_routes() -> Router<AppState> {
 
 async fn list_observed_federations(
     State(state): State<AppState>,
-) -> crate::error::Result<Json<Vec<FederationSummary>>> {
-    Ok(state.observer.list_federation_summaries().await?.into())
+) -> crate::error::Result<impl IntoResponse> {
+    let summaries = state.observer.list_federation_summaries().await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(summaries)))
+}
+
+async fn get_federation_summary(
+    Path(federation_id): Path<FederationId>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl IntoResponse> {
+    let summary = state.observer.federation_summary(federation_id).await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(summary)))
 }
 
 async fn add_observed_federation(
@@ -152,8 +169,9 @@ async fn get_federation_overview(
 
 async fn get_federation_totals(
     State(state): State<AppState>,
-) -> crate::error::Result<Json<FedimintTotals>> {
-    Ok(state.observer.totals().await?.into())
+) -> crate::error::Result<impl IntoResponse> {
+    let totals = state.observer.totals().await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(totals)))
 }
 
 async fn publish_rating_event(
@@ -200,67 +218,81 @@ async fn backfill_federation(
 
 impl FederationObserver {
     pub async fn list_federation_summaries(&self) -> anyhow::Result<Vec<FederationSummary>> {
-        // TODO: possibly combine list and health query
         let federations = self.list_federations().await?;
 
-        let federation_health = self.get_guardian_health_summary().await?;
-
-        join_all(federations.into_iter().map(|federation| {
-            let federation_health_ref = &federation_health;
-            async move {
-                let deposits = self.get_federation_assets(federation.federation_id).await?;
-
-                let name = self
-                    .consensus_meta_cache()
-                    .fetch_meta_cached(&config_to_json(federation.config.clone(), self.registry())?)
-                    .await
-                    .and_then(|meta| meta.get_as::<String>("federation_name"))
-                    .or_else(|| {
-                        federation
-                            .config
-                            .global
-                            .meta
-                            .get("federation_name")
-                            .cloned()
-                    });
-
-                let health = federation_health_ref
-                    .get(&federation.federation_id)
-                    .copied()
-                    .unwrap_or(FederationHealth::Offline);
-
-                let last_7d_activity = self
-                    .federation_activity(federation.federation_id, 7)
-                    .await?;
-
-                let (first_peer_id, first_peer_url) = federation
-                    .config
-                    .global
-                    .api_endpoints
-                    .first_key_value()
-                    .expect("At least one peer");
-                let invite = InviteCode::new(
-                    first_peer_url.url.clone(),
-                    *first_peer_id,
-                    federation.federation_id,
-                    None,
-                )
-                .to_string();
-
-                Ok(FederationSummary {
-                    id: federation.federation_id,
-                    name,
-                    last_7d_activity,
-                    deposits,
-                    invite,
-                    nostr_votes: self.federation_rating(federation.federation_id).await?,
-                    health,
-                })
-            }
-        }))
+        join_all(
+            federations
+                .into_iter()
+                .map(|federation| self.federation_summary(federation.federation_id)),
+        )
         .await
         .into_iter()
         .collect()
+    }
+
+    /// Summary for a single federation: name, health, assets, recent
+    /// activity, invite code and nostr rating. Used both by
+    /// `list_federation_summaries` (fleet overview) and the single-federation
+    /// `/federations/:federation_id/summary` endpoint.
+    pub async fn federation_summary(
+        &self,
+        federation_id: FederationId,
+    ) -> anyhow::Result<FederationSummary> {
+        let federation = self
+            .get_federation(federation_id)
+            .await?
+            .context("Federation doesn't exist")?;
+
+        let deposits = self.get_federation_assets(federation.federation_id).await?;
+
+        let name = self
+            .consensus_meta_cache()
+            .fetch_meta_cached(&config_to_json(federation.config.clone(), self.registry())?)
+            .await
+            .and_then(|meta| meta.get_as::<String>("federation_name"))
+            .or_else(|| {
+                federation
+                    .config
+                    .global
+                    .meta
+                    .get("federation_name")
+                    .cloned()
+            });
+
+        let health = self
+            .get_guardian_health_summary()
+            .await?
+            .get(&federation.federation_id)
+            .copied()
+            .unwrap_or(FederationHealth::Offline);
+
+        let last_7d_activity = self
+            .federation_activity(federation.federation_id, 7)
+            .await?;
+
+        let (first_peer_id, first_peer_url) = federation
+            .config
+            .global
+            .api_endpoints
+            .first_key_value()
+            .expect("At least one peer");
+        let invite = InviteCode::new(
+            first_peer_url.url.clone(),
+            *first_peer_id,
+            federation.federation_id,
+            None,
+        )
+        .to_string();
+
+        Ok(FederationSummary {
+            id: federation.federation_id,
+            name,
+            last_7d_activity,
+            deposits,
+            invite,
+            nostr_votes: self.federation_rating(federation.federation_id).await?,
+            health,
+        })
     }
 
     async fn federation_activity(
@@ -329,7 +361,25 @@ impl FederationObserver {
         Ok(Amount::from_msats(total_assets_msat as u64))
     }
 
+    /// Returns the cached totals (refreshed on the matview refresh cycle,
+    /// see `refresh_views_inner`). Before the first refresh cycle has
+    /// completed, computes and caches them on demand so a freshly started
+    /// process still serves totals immediately.
     pub async fn totals(&self) -> anyhow::Result<FedimintTotals> {
+        if let Some(totals) = self.cached_totals().read().await.clone() {
+            return Ok(totals);
+        }
+
+        let totals = self.compute_totals().await?;
+        *self.cached_totals().write().await = Some(totals.clone());
+        Ok(totals)
+    }
+
+    /// Computes the fleet-wide totals from scratch. Expensive: scans
+    /// `transactions`/`transaction_inputs` in full. Called on the matview
+    /// refresh cycle (`refresh_views_inner`) and, as a fallback, once by
+    /// [`Self::totals`] before the cache is warm.
+    pub async fn compute_totals(&self) -> anyhow::Result<FedimintTotals> {
         #[derive(Debug, FromRow)]
         struct FedimintTotalsResult {
             federations: i64,

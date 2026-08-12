@@ -37,6 +37,11 @@ pub struct FederationObserver {
     /// federation's fetcher is spawned; consumed by the SSE handler (Task 5)
     /// via [`FederationObserver::live_watch`].
     live_states: Arc<Mutex<HashMap<FederationId, watch::Receiver<Watermark>>>>,
+    /// Cached result of [`FederationObserver::compute_totals`], refreshed on
+    /// the same cycle as the materialized views (`refresh_views_inner`) so
+    /// the `/federations/totals` handler avoids a full-table scan on every
+    /// request. `None` until the first refresh cycle completes.
+    cached_totals: Arc<tokio::sync::RwLock<Option<fmo_api_types::FedimintTotals>>>,
 }
 
 impl FederationObserver {
@@ -85,6 +90,7 @@ impl FederationObserver {
             task_group: Default::default(),
             consensus_meta_cache: Default::default(),
             live_states: Arc::new(Mutex::new(HashMap::new())),
+            cached_totals: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Ok(observer)
@@ -148,6 +154,12 @@ impl FederationObserver {
 
     pub fn consensus_meta_cache(&self) -> &ConsensusMetaCache {
         &self.consensus_meta_cache
+    }
+
+    pub(crate) fn cached_totals(
+        &self,
+    ) -> &Arc<tokio::sync::RwLock<Option<fmo_api_types::FedimintTotals>>> {
+        &self.cached_totals
     }
 
     /// Live-poll watermark receiver for `federation_id`, if its fetcher has
