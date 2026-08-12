@@ -2,6 +2,7 @@ pub mod config;
 pub mod consensus;
 pub mod federations;
 pub mod sessions;
+mod sql_fragments;
 pub mod transactions;
 pub mod user_transactions;
 

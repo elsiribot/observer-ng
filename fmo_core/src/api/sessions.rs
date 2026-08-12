@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use anyhow::Context;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -7,6 +9,7 @@ use fmo_api_types::{SessionItem, SessionSummary};
 use postgres_from_row::FromRow;
 use serde::Deserialize;
 
+use crate::api::sql_fragments::USER_TX_LATERAL;
 use crate::api::AppState;
 use crate::observer::FederationObserver;
 use crate::query::{query, query_value};
@@ -18,6 +21,24 @@ pub(super) struct SessionPageParams {
 }
 
 const DEFAULT_SESSION_PAGE_LIMIT: i64 = 50;
+const MIN_SESSION_PAGE_LIMIT: i64 = 1;
+const MAX_SESSION_PAGE_LIMIT: i64 = 200;
+
+/// Clamps a client-supplied `limit` to a sane range so a negative or
+/// oversized value can never reach Postgres as e.g. `LIMIT -1` (which
+/// Postgres treats as "no limit", not an error, but is still unbounded and
+/// unintended).
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_SESSION_PAGE_LIMIT)
+        .clamp(MIN_SESSION_PAGE_LIMIT, MAX_SESSION_PAGE_LIMIT)
+}
+
+/// Floors a client-supplied cursor at 0; a negative cursor has no valid
+/// meaning and should not be forwarded to the query.
+fn floor_non_negative(value: Option<i64>) -> Option<i64> {
+    value.map(|v| v.max(0))
+}
 
 pub(super) async fn list_sessions(
     Path(federation_id): Path<FederationId>,
@@ -28,11 +49,32 @@ pub(super) async fn list_sessions(
         .observer
         .federation_session_page(
             federation_id,
-            params.before,
-            params.limit.unwrap_or(DEFAULT_SESSION_PAGE_LIMIT),
+            floor_non_negative(params.before),
+            clamp_limit(params.limit),
         )
         .await?
         .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_limit_is_clamped_not_passed_through() {
+        assert_eq!(clamp_limit(Some(-1)), MIN_SESSION_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(-1_000_000)), MIN_SESSION_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(0)), MIN_SESSION_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(100_000)), MAX_SESSION_PAGE_LIMIT);
+        assert_eq!(clamp_limit(None), DEFAULT_SESSION_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn negative_before_is_floored_at_zero() {
+        assert_eq!(floor_non_negative(Some(-5)), Some(0));
+        assert_eq!(floor_non_negative(Some(5)), Some(5));
+        assert_eq!(floor_non_negative(None), None);
+    }
 }
 
 pub(super) async fn count_sessions(
@@ -149,30 +191,27 @@ impl FederationObserver {
             .context("Federation doesn't exist")?;
 
         // language=postgresql
-        const QUERY: &str = "
+        static QUERY: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "
             SELECT t.item_index::bigint, 'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                    encode(t.txid,'hex') AS txid,
                    uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                    NULL::jsonb AS details
             FROM transactions t
-            LEFT JOIN LATERAL (
-                SELECT encode(utt.user_tx_key,'hex') AS user_tx_key, ut.kind AS user_tx_kind, ut.direction
-                FROM user_transaction_txs utt
-                JOIN user_transactions ut
-                  ON ut.federation_id = utt.federation_id AND ut.user_tx_key = utt.user_tx_key
-                WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid
-                LIMIT 1
-            ) uxt ON true
+            {USER_TX_LATERAL}
             WHERE t.federation_id=$1 AND t.session_index=$2
             UNION ALL
             SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL, NULL, NULL, ci.details
             FROM consensus_items ci WHERE ci.federation_id=$1 AND ci.session_index=$2
             ORDER BY 1
-        ";
+        "
+            )
+        });
 
         let rows = query::<SessionItemRow>(
             &self.connection().await?,
-            QUERY,
+            QUERY.as_str(),
             &[
                 &federation_id.consensus_encode_to_vec(),
                 &(session_index as i32),

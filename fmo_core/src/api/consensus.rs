@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use anyhow::Context;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -9,11 +11,30 @@ use postgres_from_row::FromRow;
 use serde::Deserialize;
 use tracing::{info, warn};
 
+use crate::api::sql_fragments::USER_TX_LATERAL;
 use crate::api::AppState;
 use crate::observer::FederationObserver;
 use crate::query::query;
 
 const DEFAULT_CONSENSUS_PAGE_LIMIT: i64 = 50;
+const MIN_CONSENSUS_PAGE_LIMIT: i64 = 1;
+const MAX_CONSENSUS_PAGE_LIMIT: i64 = 200;
+
+/// Clamps a client-supplied `limit` to a sane range so a negative or
+/// oversized value can never reach Postgres as e.g. `LIMIT -1` (which
+/// Postgres treats as "no limit", not an error, but is still unbounded and
+/// unintended).
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_CONSENSUS_PAGE_LIMIT)
+        .clamp(MIN_CONSENSUS_PAGE_LIMIT, MAX_CONSENSUS_PAGE_LIMIT)
+}
+
+/// Floors a client-supplied cursor component at 0; negative cursor values
+/// have no valid meaning and should not be forwarded to the query.
+fn floor_non_negative(value: Option<i64>) -> Option<i64> {
+    value.map(|v| v.max(0))
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConsensusStreamParams {
@@ -29,21 +50,40 @@ pub(super) async fn consensus_stream(
     State(state): State<AppState>,
 ) -> crate::error::Result<Json<ConsensusPage>> {
     let filter = params.filter.unwrap_or_else(|| "all".to_owned());
-    let before = match (params.before_session, params.before_item) {
+    let before_session = floor_non_negative(params.before_session);
+    let before_item = floor_non_negative(params.before_item);
+    let before = match (before_session, before_item) {
         (Some(session), Some(item)) => Some((session, item)),
         _ => None,
     };
+    let limit = clamp_limit(params.limit);
 
     Ok(state
         .observer
-        .federation_consensus_page(
-            federation_id,
-            &filter,
-            before,
-            params.limit.unwrap_or(DEFAULT_CONSENSUS_PAGE_LIMIT),
-        )
+        .federation_consensus_page(federation_id, &filter, before, limit)
         .await?
         .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_limit_is_clamped_not_passed_through() {
+        assert_eq!(clamp_limit(Some(-1)), MIN_CONSENSUS_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(-1_000_000)), MIN_CONSENSUS_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(0)), MIN_CONSENSUS_PAGE_LIMIT);
+        assert_eq!(clamp_limit(Some(100_000)), MAX_CONSENSUS_PAGE_LIMIT);
+        assert_eq!(clamp_limit(None), DEFAULT_CONSENSUS_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn negative_before_is_floored_at_zero() {
+        assert_eq!(floor_non_negative(Some(-5)), Some(0));
+        assert_eq!(floor_non_negative(Some(5)), Some(5));
+        assert_eq!(floor_non_negative(None), None);
+    }
 }
 
 #[derive(FromRow)]
@@ -78,59 +118,68 @@ impl From<ConsensusItemRow> for SessionItem {
 }
 
 // Each transaction-producing query below resolves `user_tx_key` +
-// `user_tx_kind` + `direction` together via a single LATERAL join, avoiding
-// row multiplication if a txid ever maps to more than one user_tx_key
-// (LIMIT 1) and avoiding three separate correlated subqueries.
+// `user_tx_kind` + `direction` together via a single LATERAL join
+// (`USER_TX_LATERAL`, shared with `sessions::federation_session_items`),
+// avoiding row multiplication if a txid ever maps to more than one
+// user_tx_key (LIMIT 1) and avoiding three separate correlated subqueries.
 // language=postgresql
-const TRANSACTION_ONLY_QUERY: &str = "
+static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "
     SELECT t.session_index::bigint, t.item_index::bigint, 'transaction' AS item_type,
            NULL::text AS kind, NULL::int AS peer_id,
            encode(t.txid,'hex') AS txid,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details
     FROM transactions t
-    LEFT JOIN LATERAL (
-        SELECT encode(utt.user_tx_key,'hex') AS user_tx_key, ut.kind AS user_tx_kind, ut.direction
-        FROM user_transaction_txs utt
-        JOIN user_transactions ut
-          ON ut.federation_id = utt.federation_id AND ut.user_tx_key = utt.user_tx_key
-        WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid
-        LIMIT 1
-    ) uxt ON true
+    {USER_TX_LATERAL}
     WHERE t.federation_id = $1
       AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
     ORDER BY t.session_index DESC, t.item_index DESC
     LIMIT $4
-";
+"
+    )
+});
 
+// The keyset predicate and `LIMIT` are pushed into EACH `UNION ALL` branch
+// (rather than applied once on the outer union) so that, regardless of
+// planner choices, each branch is a bounded backward index scan on its own
+// index (`transactions_by_session_item` / the `consensus_items` PK) that
+// reads at most `$4` rows -- instead of depending on the planner pushing the
+// outer predicate/limit through the appendrel on the 127M-row
+// `consensus_items` table. The outer merge then sorts at most `2 * $4` rows,
+// cheap independent of the plan chosen for either branch.
 // language=postgresql
-const ALL_QUERY: &str = "
-    SELECT * FROM (
-        SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
-               'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
-               encode(t.txid,'hex') AS txid,
-               uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
-               NULL::jsonb AS details
-        FROM transactions t
-        LEFT JOIN LATERAL (
-            SELECT encode(utt.user_tx_key,'hex') AS user_tx_key, ut.kind AS user_tx_kind, ut.direction
-            FROM user_transaction_txs utt
-            JOIN user_transactions ut
-              ON ut.federation_id = utt.federation_id AND ut.user_tx_key = utt.user_tx_key
-            WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid
-            LIMIT 1
-        ) uxt ON true
-        WHERE t.federation_id = $1
+static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details
+    FROM (
+        ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
+                 'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
+                 encode(t.txid,'hex') AS txid,
+                 uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
+                 NULL::jsonb AS details
+          FROM transactions t
+          {USER_TX_LATERAL}
+          WHERE t.federation_id = $1
+            AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
+          ORDER BY t.session_index DESC, t.item_index DESC
+          LIMIT $4 )
         UNION ALL
-        SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-               NULL, NULL, NULL, NULL, ci.details
-        FROM consensus_items ci
-        WHERE ci.federation_id = $1
-    ) combined
-    WHERE ($2::int IS NULL OR (session_index, item_index) < ($2::int, $3::int))
+        ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
+                 NULL, NULL, NULL, NULL, ci.details
+          FROM consensus_items ci
+          WHERE ci.federation_id = $1
+            AND ($2::int IS NULL OR (ci.session_index, ci.item_index) < ($2::int, $3::int))
+          ORDER BY ci.session_index DESC, ci.item_index DESC
+          LIMIT $4 )
+    ) u
     ORDER BY session_index DESC, item_index DESC
     LIMIT $4
-";
+"
+    )
+});
 
 // language=postgresql
 const KIND_QUERY: &str = "
@@ -170,7 +219,7 @@ impl FederationObserver {
             "transaction" => {
                 query::<ConsensusItemRow>(
                     &self.connection().await?,
-                    TRANSACTION_ONLY_QUERY,
+                    TRANSACTION_ONLY_QUERY.as_str(),
                     &[&fed_bytes, &before_session, &before_item, &limit],
                 )
                 .await?
@@ -178,7 +227,7 @@ impl FederationObserver {
             "all" => {
                 query::<ConsensusItemRow>(
                     &self.connection().await?,
-                    ALL_QUERY,
+                    ALL_QUERY.as_str(),
                     &[&fed_bytes, &before_session, &before_item, &limit],
                 )
                 .await?
@@ -206,13 +255,16 @@ impl FederationObserver {
     }
 }
 
-/// Builds the two composite indexes the consensus explorer needs, via
-/// `CREATE INDEX CONCURRENTLY` so the (one-time, minutes-long on the 127M-row
-/// `consensus_items` table) build doesn't block writers. Must run outside any
+/// Builds the two composite indexes the consensus explorer needs. Uses
+/// `CREATE INDEX CONCURRENTLY`, so the (one-time, potentially minutes-long on
+/// the 127M-row `consensus_items` table) build does not block concurrent
+/// writers — it is still `.await`ed by the caller before serving traffic, so
+/// it *does* delay startup for its duration; `CONCURRENTLY` only buys
+/// writer-non-blocking, not startup-non-blocking. Must run outside any
 /// transaction — each statement is issued individually on its own
-/// connection. Idempotent (`IF NOT EXISTS`) and resilient: a failure (e.g. a
-/// build already in progress from a prior crashed startup) is logged and
-/// does not stop the caller.
+/// connection. Idempotent (`IF NOT EXISTS`, plus a drop-if-invalid guard
+/// below) and resilient: a failure (e.g. a build already in progress from a
+/// prior crashed startup) is logged and does not stop the caller.
 ///
 /// Note: `transactions_by_session` (2-column, no `item_index`) already
 /// exists from the original core schema (`schema/core/v0.sql`), so the
@@ -243,7 +295,30 @@ pub async fn ensure_explorer_indexes(pool: &Pool) {
             }
         };
 
-        info!("Building explorer index {name} (CONCURRENTLY, one-time, non-blocking)...");
+        // A `CREATE INDEX CONCURRENTLY` interrupted mid-build (e.g. by a
+        // crashed/killed server) leaves an INVALID index of that name
+        // behind. `CREATE INDEX ... IF NOT EXISTS` only checks the name, not
+        // validity, so it would then treat the broken index as "present"
+        // forever and the explorer would silently run without it. `name` is
+        // one of the two hardcoded constants above (not user input), so
+        // interpolating it via `format!` here is safe; the actual DROP is
+        // still identifier-quoted by Postgres's `format('DROP INDEX %I', ...)`.
+        let drop_if_invalid = format!(
+            "DO $$ BEGIN
+               IF EXISTS (
+                 SELECT 1 FROM pg_class c
+                 JOIN pg_index i ON i.indexrelid = c.oid
+                 WHERE c.relname = '{name}' AND NOT i.indisvalid
+               ) THEN
+                 EXECUTE format('DROP INDEX %I', '{name}');
+               END IF;
+             END $$"
+        );
+        if let Err(e) = conn.execute(drop_if_invalid.as_str(), &[]).await {
+            warn!("Could not check/drop invalid explorer index {name} (continuing): {e:?}");
+        }
+
+        info!("Building explorer index {name} (CONCURRENTLY, one-time)...");
         match conn.execute(*sql, &[]).await {
             Ok(_) => info!("Explorer index {name} ready"),
             Err(e) => warn!(

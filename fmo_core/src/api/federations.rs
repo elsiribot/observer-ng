@@ -35,10 +35,6 @@ pub fn get_federations_routes() -> Router<AppState> {
             get(super::transactions::list_transactions),
         )
         .route(
-            "/:federation_id/transactions/:transaction_id",
-            get(super::transactions::transaction),
-        )
-        .route(
             "/:federation_id/transactions/count",
             get(super::transactions::count_transactions),
         )

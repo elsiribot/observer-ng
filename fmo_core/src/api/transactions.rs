@@ -1,22 +1,19 @@
 use std::collections::BTreeMap;
-use std::io::Cursor;
 
 use anyhow::Context;
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::NaiveDate;
 use fedimint_core::config::FederationId;
-use fedimint_core::core::{DynInput, DynOutput, DynUnknown};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::{Amount, TransactionId};
 use fmo_api_types::{FederationActivity, TxDetail, TxItemPart};
 use postgres_from_row::FromRow;
-use serde::Serialize;
 
 use crate::api::AppState;
 use crate::federation;
 use crate::observer::FederationObserver;
-use crate::query::{query, query_one, query_opt, query_value};
+use crate::query::{query, query_opt, query_value};
 
 pub(super) async fn list_transactions(
     Path(federation_id): Path<FederationId>,
@@ -43,20 +40,8 @@ pub(super) async fn count_transactions(
         .into())
 }
 
-pub(super) async fn transaction(
-    Path((federation_id, transaction_id)): Path<(FederationId, TransactionId)>,
-    State(state): State<AppState>,
-) -> crate::error::Result<Json<DebugTransaction>> {
-    Ok(state
-        .observer
-        .transaction_details(federation_id, transaction_id)
-        .await?
-        .into())
-}
-
 /// Structured (rich) transaction detail: inputs/outputs read straight from
-/// `transaction_inputs`/`transaction_outputs` (kind + amount + details), not
-/// the Debug-string decode `transaction()` above produces.
+/// `transaction_inputs`/`transaction_outputs` (kind + amount + details).
 pub(super) async fn transaction_detail(
     Path((federation_id, txid_hex)): Path<(FederationId, String)>,
     State(state): State<AppState>,
@@ -121,80 +106,6 @@ impl FederationObserver {
             &[&federation_id.consensus_encode_to_vec()],
         )
         .await? as u64)
-    }
-
-    pub async fn transaction_details(
-        &self,
-        federation_id: FederationId,
-        transaction_id: TransactionId,
-    ) -> anyhow::Result<DebugTransaction> {
-        let cfg = self
-            .get_federation(federation_id)
-            .await?
-            .context("Federation doesn't exist")?
-            .config;
-
-        let tx = query_one::<federation::Transaction>(&self.connection().await?, "SELECT txid, session_index, item_index, data FROM transactions WHERE federation_id = $1 AND txid = $2", &[&federation_id.consensus_encode_to_vec(), &transaction_id.consensus_encode_to_vec()]).await?;
-
-        let decoders = self.registry().decoders(&cfg);
-
-        let inputs = tx
-            .data
-            .inputs
-            .into_iter()
-            .map(|input| {
-                let module_instance_id = input.module_instance_id();
-                match input.as_any().downcast_ref::<DynUnknown>() {
-                    Some(undecoded) => decoders
-                        .get(module_instance_id)
-                        .map(|decoder| {
-                            decoder
-                                .decode_complete::<DynInput>(
-                                    &mut Cursor::new(&undecoded.0),
-                                    undecoded.0.len() as u64,
-                                    module_instance_id,
-                                    &Default::default(),
-                                )
-                                .map(|input| format!("{input:?}"))
-                                .unwrap_or_else(|e| format!("Decoding failed: {e}"))
-                        })
-                        .unwrap_or_else(|| {
-                            format!("Unknown module, instance id={module_instance_id}")
-                        }),
-                    None => format!("{input:?}"),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let outputs = tx
-            .data
-            .outputs
-            .into_iter()
-            .map(|output| {
-                let module_instance_id = output.module_instance_id();
-                match output.as_any().downcast_ref::<DynUnknown>() {
-                    Some(undecoded) => decoders
-                        .get(module_instance_id)
-                        .map(|decoder| {
-                            decoder
-                                .decode_complete::<DynOutput>(
-                                    &mut Cursor::new(&undecoded.0),
-                                    undecoded.0.len() as u64,
-                                    module_instance_id,
-                                    &Default::default(),
-                                )
-                                .map(|output| format!("{output:?}"))
-                                .unwrap_or_else(|e| format!("Decoding failed: {e}"))
-                        })
-                        .unwrap_or_else(|| {
-                            format!("Unknown module, instance id={module_instance_id}")
-                        }),
-                    None => format!("{output:?}"),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        Ok(DebugTransaction { inputs, outputs })
     }
 
     /// Structured transaction detail: `transactions` row (session/item
@@ -321,12 +232,6 @@ impl FederationObserver {
 
         Ok(histogram)
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DebugTransaction {
-    inputs: Vec<String>,
-    outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]

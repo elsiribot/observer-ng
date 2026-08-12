@@ -90,11 +90,13 @@ impl FederationObserver {
     ) -> anyhow::Result<FederationObserver> {
         let observer = Self::new_without_tasks(database, admin_auth, mempool_url, registry).await?;
 
-        // One-time, idempotent, non-blocking (CONCURRENTLY) index build for
-        // the consensus explorer; run before spawning per-federation tasks
-        // so it doesn't race the fetchers/processors for the pool, but
-        // without blocking startup on the (potentially minutes-long, on the
-        // 127M-row consensus_items table) build itself.
+        // One-time, idempotent index build for the consensus explorer, run
+        // before spawning per-federation tasks so it doesn't race the
+        // fetchers/processors for the pool. This IS awaited before serving,
+        // so it blocks startup for its duration (potentially minutes, on the
+        // 127M-row consensus_items table); `CREATE INDEX CONCURRENTLY` only
+        // means the build itself is non-blocking to concurrent writers, not
+        // that it's non-blocking to startup.
         crate::api::consensus::ensure_explorer_indexes(&observer.pool).await;
 
         observer.seed_block_times().await?;
