@@ -1,3 +1,7 @@
+/* eslint-disable react-refresh/only-export-components --
+ * This module intentionally pairs the `SessionDetail` component with its
+ * pure, independently-unit-tested helper `sessionItemBreakdown`; the two are
+ * tightly coupled and small enough that a separate file would be overkill. */
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
@@ -5,6 +9,33 @@ import type { SessionItem } from '../types/api';
 import { ItemList } from '../components/explorer/ItemList';
 import { Alert } from '../components/Alert';
 import { formatNumber, formatTimestamp } from '../utils/format';
+
+// Summarizes a session's item list into a compact, deterministically ordered
+// breakdown: a `transactions` entry first (if any), then one entry per
+// distinct consensus-item `kind` (null kind grouped under `unknown`), sorted
+// by count descending then label ascending.
+export function sessionItemBreakdown(items: SessionItem[]): { label: string; count: number }[] {
+  const txCount = items.filter((item) => item.item_type === 'transaction').length;
+  const ciKindCounts = new Map<string, number>();
+  for (const item of items) {
+    if (item.item_type !== 'ci') {
+      continue;
+    }
+    const label = item.kind ?? 'unknown';
+    ciKindCounts.set(label, (ciKindCounts.get(label) ?? 0) + 1);
+  }
+
+  const kindEntries = Array.from(ciKindCounts.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+  const breakdown: { label: string; count: number }[] = [];
+  if (txCount > 0) {
+    breakdown.push({ label: 'transactions', count: txCount });
+  }
+  breakdown.push(...kindEntries);
+  return breakdown;
+}
 
 // Session-detail page: the full ordered item list (transactions + consensus
 // items) of one session, drilled into from the federation's Sessions tab.
@@ -51,8 +82,7 @@ export function SessionDetail() {
       .finally(() => setLoading(false));
   }, [id, sessionIndex]);
 
-  const txCount = items.filter((item) => item.item_type === 'transaction').length;
-  const ciCount = items.length - txCount;
+  const breakdown = sessionItemBreakdown(items);
 
   return (
     <div className="py-4 sm:py-8 px-4 sm:px-0">
@@ -68,9 +98,32 @@ export function SessionDetail() {
       <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mb-2 break-words">
         Session {Number.isNaN(sessionIndex) ? sessionIndexParam : formatNumber(sessionIndex)}
       </h1>
+
+      {!Number.isNaN(sessionIndex) && (
+        <div className="flex items-center justify-between mb-2 text-sm sm:text-base">
+          {sessionIndex > 0 ? (
+            <Link
+              to={`/federations/${id}/session/${sessionIndex - 1}`}
+              className="text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              ← Session {formatNumber(sessionIndex - 1)}
+            </Link>
+          ) : (
+            <span />
+          )}
+          <Link
+            to={`/federations/${id}/session/${sessionIndex + 1}`}
+            className="text-blue-600 dark:text-blue-400 hover:underline"
+          >
+            Session {formatNumber(sessionIndex + 1)} →
+          </Link>
+        </div>
+      )}
+
       <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6 sm:mb-8">
-        {formatTimestamp(estimatedTime)} · {formatNumber(txCount)} transactions ·{' '}
-        {formatNumber(ciCount)} consensus items
+        {formatTimestamp(estimatedTime)}
+        {breakdown.length > 0 &&
+          ' · ' + breakdown.map((b) => `${formatNumber(b.count)} ${b.label}`).join(' · ')}
       </div>
 
       {error && items.length === 0 ? (
