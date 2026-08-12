@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import { renderItem } from './itemRenderers';
-import type { SessionItem } from '../../types/api';
+import { renderItem, TxDetailBody } from './itemRenderers';
+import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
 
 function renderWithRouter(item: SessionItem) {
   return render(
@@ -126,5 +126,50 @@ describe('renderItem', () => {
         details: { BlockCount: 'not-a-number' },
       })
     ).not.toThrow();
+  });
+});
+
+describe('TxDetailBody', () => {
+  const part = (index: number, kind: string, amount_msat: number | null): TxItemPart => ({
+    index,
+    kind,
+    amount_msat,
+    details: null,
+  });
+
+  function detail(inputs: TxItemPart[], outputs: TxItemPart[]): TxDetail {
+    return { txid: 'tx1', session_index: 1, item_index: 0, inputs, outputs, user_tx_key: null };
+  }
+
+  it('shows total in / out / fee in sats (fee = inputs − outputs)', () => {
+    render(
+      <TxDetailBody
+        detail={detail(
+          [part(0, 'mint', 100_000), part(1, 'mint', 50_000)],
+          [part(0, 'ln', 120_000)]
+        )}
+      />
+    );
+    expect(screen.getByText('Total in')).toBeInTheDocument();
+    expect(screen.getByText('150 sats')).toBeInTheDocument(); // 150_000 msat
+    expect(screen.getByText('120 sats')).toBeInTheDocument(); // 120_000 msat
+    expect(screen.getByText('Fee')).toBeInTheDocument();
+    expect(screen.getByText('30 sats')).toBeInTheDocument(); // 30_000 msat
+  });
+
+  it('marks totals approximate and fee unknown when an amount is null', () => {
+    render(
+      <TxDetailBody detail={detail([part(0, 'walletv2', null)], [part(0, 'mint', 40_000)])} />
+    );
+    // Input total unknown → approximate marker, and the fee can't be computed.
+    expect(screen.getByText('≥ 0 sats')).toBeInTheDocument();
+    expect(screen.getByText('unknown')).toBeInTheDocument();
+  });
+
+  it('renders loading and error states without a detail', () => {
+    const { rerender } = render(<TxDetailBody detail={null} loading />);
+    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    rerender(<TxDetailBody detail={null} error="boom" />);
+    expect(screen.getByText('boom')).toBeInTheDocument();
   });
 });

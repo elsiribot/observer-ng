@@ -8,8 +8,8 @@ import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Badge, type BadgeLevel } from '../Badge';
 import { api } from '../../services/api';
-import { formatNumber } from '../../utils/format';
-import type { SessionItem, TxDetail } from '../../types/api';
+import { asSats, formatNumber } from '../../utils/format';
+import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
 
 // Renderer registry for one `SessionItem` (a fedimint transaction or a
 // consensus item) as it appears in a session's item list or the federation
@@ -75,28 +75,43 @@ function directionHint(direction: string | null): string | null {
   }
 }
 
-function TransactionRow({ item }: { item: SessionItem }) {
-  const { id: federationId } = useParams<{ id: string }>();
+// On-demand loader for a fedimint transaction's structured detail, shared by
+// the consensus/session item rows and the user-transaction page's member-tx
+// rows. Fetches once, the first time the row is expanded.
+export function useTxDetailToggle(federationId: string | undefined, txid: string | null) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<TxDetail | null>(null);
-  const [loadingDetail, setLoadingDetail] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleToggle = () => {
+  const toggle = () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && !detail && !loadingDetail && federationId && item.txid) {
-      setLoadingDetail(true);
-      setDetailError(null);
+    if (next && !detail && !loading && federationId && txid) {
+      setLoading(true);
+      setError(null);
       api
-        .getTxDetail(federationId, item.txid)
+        .getTxDetail(federationId, txid)
         .then(setDetail)
         .catch((err: unknown) => {
-          setDetailError(err instanceof Error ? err.message : 'Failed to load transaction details');
+          setError(err instanceof Error ? err.message : 'Failed to load transaction details');
         })
-        .finally(() => setLoadingDetail(false));
+        .finally(() => setLoading(false));
     }
   };
+
+  return { expanded, toggle, detail, loading, error };
+}
+
+function TransactionRow({ item }: { item: SessionItem }) {
+  const { id: federationId } = useParams<{ id: string }>();
+  const {
+    expanded,
+    toggle: handleToggle,
+    detail,
+    loading: loadingDetail,
+    error: detailError,
+  } = useTxDetailToggle(federationId, item.txid);
 
   const badge = classificationBadge(item.user_tx_kind);
   const direction = directionHint(item.direction);
@@ -143,17 +158,90 @@ function TransactionRow({ item }: { item: SessionItem }) {
         )}
       </div>
       {expanded && (
-        <div className="mt-2 text-xs text-gray-700 dark:text-gray-300">
-          {loadingDetail && <span>Loading…</span>}
-          {detailError && <span className="text-red-500 dark:text-red-400">{detailError}</span>}
-          {detail && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <TxPartsList title="Inputs" parts={detail.inputs} />
-              <TxPartsList title="Outputs" parts={detail.outputs} />
-            </div>
-          )}
-        </div>
+        <TxDetailBody detail={detail} loading={loadingDetail} error={detailError} />
       )}
+    </div>
+  );
+}
+
+// Sums the amounts of a tx's inputs or outputs. `complete` is false when any
+// part's amount is unknown (NULL), so totals/fee can be shown as approximate
+// rather than silently wrong.
+function partsTotal(parts: TxItemPart[]): { total: number; complete: boolean } {
+  let total = 0;
+  let complete = true;
+  for (const part of parts) {
+    if (part.amount_msat === null) {
+      complete = false;
+    } else {
+      total += part.amount_msat;
+    }
+  }
+  return { total, complete };
+}
+
+// Structured body of a fedimint transaction: its inputs/outputs plus a
+// total-in / total-out / fee summary (fee = inputs − outputs). Shared by the
+// item-row expander and the user-transaction member-tx rows. Renders its own
+// loading/error states so callers just pass the async result through.
+export function TxDetailBody({
+  detail,
+  loading = false,
+  error = null,
+}: {
+  detail: TxDetail | null;
+  loading?: boolean;
+  error?: string | null;
+}) {
+  const totalIn = detail ? partsTotal(detail.inputs) : null;
+  const totalOut = detail ? partsTotal(detail.outputs) : null;
+  const feeKnown = totalIn?.complete && totalOut?.complete;
+  const fee = totalIn && totalOut ? totalIn.total - totalOut.total : 0;
+
+  return (
+    <div className="mt-2 text-xs text-gray-700 dark:text-gray-300">
+      {loading && <span>Loading…</span>}
+      {error && <span className="text-red-500 dark:text-red-400">{error}</span>}
+      {detail && totalIn && totalOut && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <TxPartsList title="Inputs" parts={detail.inputs} />
+            <TxPartsList title="Outputs" parts={detail.outputs} />
+          </div>
+          <dl className="mt-3 pt-2 border-t border-gray-200 dark:border-gray-700 grid grid-cols-3 gap-2 text-xs">
+            <TotalCell label="Total in" value={totalIn.total} approximate={!totalIn.complete} />
+            <TotalCell label="Total out" value={totalOut.total} approximate={!totalOut.complete} />
+            {feeKnown ? (
+              <TotalCell label="Fee" value={fee} />
+            ) : (
+              <div>
+                <dt className="uppercase text-gray-400 dark:text-gray-500">Fee</dt>
+                <dd className="font-mono text-gray-400 dark:text-gray-500">unknown</dd>
+              </div>
+            )}
+          </dl>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TotalCell({
+  label,
+  value,
+  approximate = false,
+}: {
+  label: string;
+  value: number;
+  approximate?: boolean;
+}) {
+  return (
+    <div>
+      <dt className="uppercase text-gray-400 dark:text-gray-500">{label}</dt>
+      <dd className="font-mono text-gray-900 dark:text-white tabular-nums">
+        {approximate ? '≥ ' : ''}
+        {asSats(value)}
+      </dd>
     </div>
   );
 }
@@ -174,7 +262,7 @@ function TxPartsList({ title, parts }: { title: string; parts: TxDetail['inputs'
         {parts.map((part) => (
           <li key={part.index}>
             {part.kind}
-            {part.amount_msat !== null ? ` — ${formatNumber(part.amount_msat)} msat` : ''}
+            {part.amount_msat !== null ? ` — ${asSats(part.amount_msat)}` : ''}
           </li>
         ))}
       </ul>

@@ -6,7 +6,12 @@ import type { MemberTx, UserTransaction as UserTransactionData } from '../types/
 import { Alert } from '../components/Alert';
 import { Badge, type BadgeLevel } from '../components/Badge';
 import { Copyable } from '../components/Copyable';
-import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
+import {
+  classificationBadge,
+  shorten,
+  useTxDetailToggle,
+  TxDetailBody,
+} from '../components/explorer/itemRenderers';
 import { asSats, formatNumber, formatTimestamp } from '../utils/format';
 
 // Badge levels for a member tx's role in a user transaction's lifecycle
@@ -141,22 +146,36 @@ function SummaryField({ label, children }: { label: string; children: ReactNode 
 }
 
 function MemberTxRow({ federationId, memberTx }: { federationId: string; memberTx: MemberTx }) {
+  const { expanded, toggle, detail, loading, error } = useTxDetailToggle(
+    federationId,
+    memberTx.txid
+  );
   return (
-    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 p-4">
-      <Badge level={roleBadgeLevel(memberTx.role)}>{memberTx.role}</Badge>
-      <Link
-        to={`/federations/${federationId}/tx/${memberTx.txid}`}
-        className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline shrink-0"
-        title={memberTx.txid}
-      >
-        {shorten(memberTx.txid)}
-      </Link>
-      <div className="flex-1 min-w-0 max-w-xs">
-        <Copyable text={memberTx.txid} />
+    <div className="p-4">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+        <Badge level={roleBadgeLevel(memberTx.role)}>{memberTx.role}</Badge>
+        <Link
+          to={`/federations/${federationId}/tx/${memberTx.txid}`}
+          className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+          title={memberTx.txid}
+        >
+          {shorten(memberTx.txid)}
+        </Link>
+        <div className="flex-1 min-w-0 max-w-xs">
+          <Copyable text={memberTx.txid} />
+        </div>
+        <span className="text-xs text-gray-500 dark:text-gray-400 sm:ml-auto shrink-0">
+          Session {formatNumber(memberTx.session_index)}
+        </span>
+        <button
+          type="button"
+          onClick={toggle}
+          className="text-xs text-gray-500 dark:text-gray-400 hover:underline shrink-0 text-left"
+        >
+          {expanded ? 'Hide details' : 'Show details'}
+        </button>
       </div>
-      <span className="text-xs text-gray-500 dark:text-gray-400 sm:ml-auto shrink-0">
-        Session {formatNumber(memberTx.session_index)}
-      </span>
+      {expanded && <TxDetailBody detail={detail} loading={loading} error={error} />}
     </div>
   );
 }
