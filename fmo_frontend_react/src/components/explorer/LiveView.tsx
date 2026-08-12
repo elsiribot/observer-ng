@@ -2,7 +2,7 @@
  * `foldLiveItem` is exported alongside the component purely so the boundary
  * logic can be unit-tested as a pure function, mirroring the pattern in
  * `itemRenderers.tsx`. */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { subscribeLive } from '../../services/api';
 import type { SessionItem } from '../../types/api';
 import { ItemList } from './ItemList';
@@ -17,6 +17,11 @@ interface LiveState {
 }
 
 const EMPTY_LIVE_STATE: LiveState = { currentSession: null, items: [] };
+
+// How long the "(session N sealed)" hint stays visible after a rollover,
+// so it reads as a transient notice rather than a permanent label once the
+// live view has moved on to the next session.
+const JUST_SEALED_DISPLAY_MS = 5000;
 
 // Folds one incoming item into the current live state. Pure function of
 // (prevState, item) — no external mutation — so it's safe to pass to
@@ -51,6 +56,7 @@ export function LiveView({ federationId }: LiveViewProps) {
   const [state, setState] = useState<LiveState>(EMPTY_LIVE_STATE);
   const [error, setError] = useState<string | null>(null);
   const [justSealed, setJustSealed] = useState<number | null>(null);
+  const justSealedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // Reset all view state on federation change so a stale item from the
@@ -58,6 +64,10 @@ export function LiveView({ federationId }: LiveViewProps) {
     setState(EMPTY_LIVE_STATE);
     setError(null);
     setJustSealed(null);
+    if (justSealedTimerRef.current !== null) {
+      clearTimeout(justSealedTimerRef.current);
+      justSealedTimerRef.current = null;
+    }
 
     const controller = new AbortController();
 
@@ -67,9 +77,20 @@ export function LiveView({ federationId }: LiveViewProps) {
         onItem: (item) => {
           setError(null);
           setState((prev) => foldLiveItem(prev, item));
+          // The new session has visibly started (an item for it arrived),
+          // so the "sealed" hint about the previous session no longer
+          // needs to be shown.
+          setJustSealed((prev) => (prev !== null && item.session_index > prev ? null : prev));
         },
         onRollover: (sessionIndex) => {
           setJustSealed(sessionIndex);
+          if (justSealedTimerRef.current !== null) {
+            clearTimeout(justSealedTimerRef.current);
+          }
+          justSealedTimerRef.current = setTimeout(() => {
+            justSealedTimerRef.current = null;
+            setJustSealed((prev) => (prev === sessionIndex ? null : prev));
+          }, JUST_SEALED_DISPLAY_MS);
         },
         onError: (err) => {
           setError(err instanceof Error ? err.message : 'Live connection interrupted, retrying…');
@@ -78,7 +99,13 @@ export function LiveView({ federationId }: LiveViewProps) {
       controller.signal
     );
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (justSealedTimerRef.current !== null) {
+        clearTimeout(justSealedTimerRef.current);
+        justSealedTimerRef.current = null;
+      }
+    };
   }, [federationId]);
 
   const { items, currentSession } = state;

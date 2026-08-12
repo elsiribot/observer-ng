@@ -184,19 +184,30 @@ async function readLiveStream(body: ReadableStream<Uint8Array>, handlers: LiveHa
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      return;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        dispatchSseFrame(frame, handlers);
+        boundary = buffer.indexOf('\n\n');
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary !== -1) {
-      const frame = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      dispatchSseFrame(frame, handlers);
-      boundary = buffer.indexOf('\n\n');
-    }
+  } catch (err) {
+    // Release the stream promptly on a mid-stream error instead of leaving
+    // it dangling until GC -- the caller (`runLiveLoop`) reconnects right
+    // after, so a fresh `fetch` starts while the old stream is still
+    // technically open otherwise. `cancel()`'s own result/rejection isn't
+    // useful here (we're already erroring out), so it's intentionally
+    // ignored.
+    void reader.cancel().catch(() => {});
+    throw err;
   }
 }
 
@@ -228,10 +239,14 @@ function dispatchSseFrame(frame: string, handlers: LiveHandlers): void {
 // timer alive past unmount.
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(timer);
       resolve();
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
