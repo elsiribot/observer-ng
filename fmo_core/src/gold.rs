@@ -496,26 +496,38 @@ pub async fn heal_gold(conn: &impl deadpool_postgres::GenericClient) -> anyhow::
     // walletv2 input amount was NULL at fold time and is now inferred. Bounded
     // to currently-NULL peg_in_v2 rows whose walletv2 input is now non-NULL, so
     // legitimately-NULL rows are never re-touched.
+    //
+    // The driving set is the (usually near-empty) set of still-NULL peg_in_v2
+    // rows; we join only *their* inputs/outputs by (federation_id, txid), which
+    // both PKs index as a prefix. This avoids aggregating the entire
+    // transaction_inputs table every cycle just to discard all but a handful of
+    // groups.
     conn.execute(
         "UPDATE user_transactions ut
-         SET amount_msat = wv2.walletv2_amt,
-             fedimint_fee_msat = wv2.in_total - wv2.out_total
+         SET amount_msat = agg.walletv2_amt,
+             fedimint_fee_msat = agg.in_total - agg.out_total
          FROM (
-             SELECT ti.federation_id, ti.txid,
+             SELECT p.federation_id, p.user_tx_key AS txid,
                     SUM(ti.amount_msat) FILTER (WHERE ti.kind = 'walletv2') AS walletv2_amt,
                     SUM(ti.amount_msat) AS in_total,
                     (SELECT SUM(o.amount_msat) FROM transaction_outputs o
-                      WHERE o.federation_id = ti.federation_id AND o.txid = ti.txid) AS out_total
-             FROM transaction_inputs ti
-             GROUP BY ti.federation_id, ti.txid
-         ) wv2
-         WHERE ut.federation_id = wv2.federation_id
-           AND ut.user_tx_key = wv2.txid
+                      WHERE o.federation_id = p.federation_id AND o.txid = p.user_tx_key) AS out_total
+             FROM (
+                 SELECT federation_id, user_tx_key
+                 FROM user_transactions
+                 WHERE kind = 'peg_in_v2' AND amount_msat IS NULL
+             ) p
+             JOIN transaction_inputs ti
+               ON ti.federation_id = p.federation_id AND ti.txid = p.user_tx_key
+             GROUP BY p.federation_id, p.user_tx_key
+         ) agg
+         WHERE ut.federation_id = agg.federation_id
+           AND ut.user_tx_key = agg.txid
            AND ut.kind = 'peg_in_v2'
            AND ut.amount_msat IS NULL
-           AND wv2.walletv2_amt IS NOT NULL
-           AND wv2.in_total IS NOT NULL
-           AND wv2.out_total IS NOT NULL",
+           AND agg.walletv2_amt IS NOT NULL
+           AND agg.in_total IS NOT NULL
+           AND agg.out_total IS NOT NULL",
         &[],
     )
     .await?;
