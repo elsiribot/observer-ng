@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::ensure;
@@ -8,11 +9,13 @@ use fedimint_core::config::FederationId;
 use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::task::TaskGroup;
+use tokio::sync::watch;
 use tokio_postgres::NoTls;
 use tracing::{error, info_span, Instrument};
 
 use crate::db::migrations::{setup_core_schema, setup_module_schema};
 use crate::federation::Federation;
+use crate::live::Watermark;
 use crate::module::ModuleTaskCtx;
 use crate::query::{query, query_opt};
 use crate::registry::ModuleRegistry;
@@ -30,6 +33,10 @@ pub struct FederationObserver {
     admin_auth: String,
     task_group: TaskGroup,
     consensus_meta_cache: ConsensusMetaCache,
+    /// Per-federation live-poll watermark receivers, populated as each
+    /// federation's fetcher is spawned; consumed by the SSE handler (Task 5)
+    /// via [`FederationObserver::live_watch`].
+    live_states: Arc<Mutex<HashMap<FederationId, watch::Receiver<Watermark>>>>,
 }
 
 impl FederationObserver {
@@ -77,6 +84,7 @@ impl FederationObserver {
             admin_auth: admin_auth.to_owned(),
             task_group: Default::default(),
             consensus_meta_cache: Default::default(),
+            live_states: Arc::new(Mutex::new(HashMap::new())),
         };
 
         Ok(observer)
@@ -142,6 +150,18 @@ impl FederationObserver {
         &self.consensus_meta_cache
     }
 
+    /// Live-poll watermark receiver for `federation_id`, if its fetcher has
+    /// been spawned (i.e. it's a known federation). Cloning a `watch`
+    /// receiver is cheap and independent -- each caller (e.g. an SSE
+    /// connection) gets its own cursor into the same broadcast state.
+    pub fn live_watch(&self, federation_id: FederationId) -> Option<watch::Receiver<Watermark>> {
+        self.live_states
+            .lock()
+            .unwrap()
+            .get(&federation_id)
+            .cloned()
+    }
+
     pub(crate) async fn connection(&self) -> anyhow::Result<deadpool_postgres::Object> {
         Ok(self.pool.get().await?)
     }
@@ -203,17 +223,31 @@ impl FederationObserver {
         let federation_id = federation.federation_id;
 
         {
+            let (wm_tx, wm_rx) = watch::channel(Watermark::default());
+            self.live_states
+                .lock()
+                .unwrap()
+                .insert(federation_id, wm_rx);
+
             let observer = self.clone();
             let config = federation.config.clone();
             self.task_group.spawn_cancellable(
                 format!("Fetcher for {federation_id}"),
                 async move {
+                    // `wm_tx` is captured by this `async move` block and
+                    // lives for the lifetime of the restart loop below
+                    // (`watch::Sender` isn't `Clone`); each `run_fetcher`
+                    // call just borrows it, so the watermark channel
+                    // survives fetcher restarts.
                     loop {
                         let e = crate::fetch::run_fetcher(
                             observer.pool.clone(),
                             observer.connectors.clone(),
                             federation_id,
                             config.clone(),
+                            observer.registry.clone(),
+                            observer.services.clone(),
+                            &wm_tx,
                         )
                         .await
                         .expect_err("fetcher task exited unexpectedly");

@@ -1,23 +1,138 @@
 //! Live processing: the pure per-poll step (Task 3) that the live fetch loop
-//! (a later task) calls as guardians accept new items into an in-progress
-//! session, plus the finalize step run once the session signs.
+//! (Task 4) calls as guardians accept new items into an in-progress session,
+//! plus the finalize step run once the session signs, plus (Task 4) the
+//! actual network-facing poll loop and the watermark type used to publish
+//! live-poll progress to the SSE handler (Task 5).
 //!
-//! No network/watch/SSE code lives here -- just DB-testable functions that
-//! run ingest -> module dispatch -> gold fold for a slice of items, in one
-//! transaction, so a poll is atomic and safe to retry.
+//! `live_process`/`finalize_live_session` are the pure per-poll/finalize DB
+//! steps; `run_live` is the only network-facing piece in this module.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use deadpool_postgres::Pool;
+use fedimint_api_client::api::DynGlobalApi;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::session_outcome::AcceptedItem;
+use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_core::module::ApiVersion;
+use fedimint_core::session_outcome::{AcceptedItem, SessionStatus};
+use tokio::sync::watch;
+use tracing::warn;
 
 use crate::dispatch::dispatch_items_to_module;
 use crate::gold::fold_sessions;
 use crate::ingest::ingest_items;
 use crate::registry::ModuleRegistry;
 use crate::services::CoreServices;
+
+/// Live-poll progress for one federation, published on a `watch` channel so
+/// the SSE handler (Task 5) can stream updates without polling the DB.
+///
+/// `Default` (all zero, `rolled_over: false`) represents "no live poll has
+/// reported anything yet" -- it is intentionally indistinguishable from
+/// "session 0, item 0, not yet rolled over" since a fresh federation starts
+/// there anyway.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Watermark {
+    pub session_index: i64,
+    pub item_index: i64,
+    pub rolled_over: bool,
+}
+
+/// How long `run_live` sleeps between polls of a not-yet-complete session,
+/// overridable via `FO_LIVE_POLL_SECS` (default 1s).
+fn live_poll_interval() -> Duration {
+    let secs = std::env::var("FO_LIVE_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1);
+    Duration::from_secs(secs)
+}
+
+/// Live-polls a single session (`session_index`) until it completes, calling
+/// [`live_process`] on each newly observed batch of items and
+/// [`finalize_live_session`] once the session signs.
+///
+/// Returns `Ok(())` only once the session is `Complete` -- the caller (the
+/// fetcher's catch-up/live transition loop) is responsible for advancing to
+/// the next session index; this function never loops across sessions.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_live(
+    pool: &Pool,
+    registry: &ModuleRegistry,
+    services: &Arc<CoreServices>,
+    federation_id: FederationId,
+    config: &ClientConfig,
+    api: &DynGlobalApi,
+    decoders: &ModuleDecoderRegistry,
+    wm: &watch::Sender<Watermark>,
+    session_index: u64,
+) -> anyhow::Result<()> {
+    let mut next_item_index = 0usize;
+
+    loop {
+        // V1 (core_api_version below the V2 threshold, no broadcast keys):
+        // routes to the plain SESSION_STATUS_ENDPOINT consensus request, no
+        // signature verification needed for the live/pending path.
+        match api
+            .get_session_status(session_index, decoders, ApiVersion::new(0, 0), None)
+            .await
+        {
+            Ok(SessionStatus::Initial) => {
+                tokio::time::sleep(live_poll_interval()).await;
+            }
+            Ok(SessionStatus::Pending(items)) => {
+                if items.len() > next_item_index {
+                    live_process(
+                        pool,
+                        registry,
+                        services,
+                        federation_id,
+                        config,
+                        session_index,
+                        &items,
+                        next_item_index,
+                    )
+                    .await?;
+                    next_item_index = items.len();
+                    let _ = wm.send(Watermark {
+                        session_index: session_index as i64,
+                        item_index: items.len() as i64 - 1,
+                        rolled_over: false,
+                    });
+                }
+                tokio::time::sleep(live_poll_interval()).await;
+            }
+            Ok(SessionStatus::Complete(outcome)) => {
+                let data = outcome.consensus_encode_to_vec();
+                finalize_live_session(
+                    pool,
+                    registry,
+                    services,
+                    federation_id,
+                    config,
+                    session_index,
+                    &outcome.items,
+                    next_item_index,
+                    &data,
+                    None,
+                )
+                .await?;
+                let _ = wm.send(Watermark {
+                    session_index: session_index as i64,
+                    item_index: outcome.items.len().saturating_sub(1) as i64,
+                    rolled_over: true,
+                });
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(session_index, "get_session_status failed: {e:#}");
+                tokio::time::sleep(live_poll_interval()).await;
+            }
+        }
+    }
+}
 
 /// Processes `items[start..]` of an in-progress (possibly still-open)
 /// session: structural ingest, then every installed module's dispatch hooks,
@@ -193,4 +308,34 @@ pub async fn finalize_live_session(
 
     dbtx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Watermark;
+
+    #[test]
+    fn watermark_default_is_zeroed_and_not_rolled_over() {
+        let wm = Watermark::default();
+        assert_eq!(wm.session_index, 0);
+        assert_eq!(wm.item_index, 0);
+        assert!(!wm.rolled_over);
+    }
+
+    #[test]
+    fn watermark_equality_is_field_wise() {
+        let a = Watermark {
+            session_index: 3,
+            item_index: 7,
+            rolled_over: false,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = Watermark {
+            rolled_over: true,
+            ..a.clone()
+        };
+        assert_ne!(a, c);
+    }
 }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use deadpool_postgres::Pool;
@@ -5,25 +6,36 @@ use fedimint_api_client::api::DynGlobalApi;
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::Encodable;
+use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::util::backoff_util::background_backoff;
 use fedimint_core::util::retry;
 use futures::StreamExt;
+use tokio::sync::watch;
 use tracing::{debug, info};
 
 use crate::ingest::ingest_session;
+use crate::live::{run_live, Watermark};
 use crate::query::query_value;
 use crate::registry::ModuleRegistry;
+use crate::services::CoreServices;
 
 /// Fetches sessions from the federation and writes raw session data plus
 /// structural facts into the core tables. Does NOT do any module-specific
 /// decoding — that is the dispatch engine's job.
 ///
-/// Never returns unless an error occurs.
+/// Alternates between bounded catch-up (bulk `await_block` fetch of every
+/// signed session not yet ingested) and live polling (Task 4's [`run_live`])
+/// of the currently-open session once caught up. Never returns unless an
+/// error occurs.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_fetcher(
     pool: Pool,
     connectors: ConnectorRegistry,
     federation_id: FederationId,
     config: ClientConfig,
+    registry: Arc<ModuleRegistry>,
+    services: Arc<CoreServices>,
+    watermark_tx: &watch::Sender<Watermark>,
 ) -> anyhow::Result<()> {
     let peers = config
         .global
@@ -35,7 +47,7 @@ pub async fn run_fetcher(
     let decoders = ModuleRegistry::fallback_decoders();
 
     info!("Starting session fetcher for {federation_id}");
-    let next_session = query_value::<Option<i32>>(
+    let mut next_session = query_value::<Option<i32>>(
         &pool.get().await?,
         "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1",
         &[&federation_id.consensus_encode_to_vec()],
@@ -45,7 +57,59 @@ pub async fn run_fetcher(
     .unwrap_or(0);
     debug!("Next session {next_session}");
 
-    let mut session_stream = futures::stream::iter(next_session..)
+    loop {
+        let count = api.session_count().await?;
+
+        if next_session < count {
+            // Bounded catch-up: bulk-fetch every signed session not yet
+            // ingested. Bounded to `next_session..count` (not
+            // `next_session..`) so the stream drains and we re-check
+            // `session_count` -- otherwise we would never reach the live
+            // phase below.
+            next_session = catch_up(
+                &pool,
+                &api,
+                &decoders,
+                federation_id,
+                &config,
+                next_session,
+                count,
+            )
+            .await?;
+            continue;
+        }
+
+        // Caught up: session `next_session` (== count) is the currently
+        // open one. Go live on it until it completes, then advance.
+        run_live(
+            &pool,
+            &registry,
+            &services,
+            federation_id,
+            &config,
+            &api,
+            &decoders,
+            watermark_tx,
+            next_session,
+        )
+        .await?;
+        next_session += 1;
+    }
+}
+
+/// Bulk-fetches and ingests every signed session in `next_session..count`
+/// via `await_block`, buffered 32-wide. Returns the next session index to
+/// fetch (== `count`) once the stream drains.
+async fn catch_up(
+    pool: &Pool,
+    api: &DynGlobalApi,
+    decoders: &ModuleDecoderRegistry,
+    federation_id: FederationId,
+    config: &ClientConfig,
+    next_session: u64,
+    count: u64,
+) -> anyhow::Result<u64> {
+    let mut session_stream = futures::stream::iter(next_session..count)
         .map(move |session_index| {
             debug!("Starting fetch job for session {session_index}");
             let api_fetch_single = api.clone();
@@ -75,7 +139,7 @@ pub async fn run_fetcher(
         let dbtx = connection.transaction().await?;
         ingest_session(
             &dbtx,
-            &config,
+            config,
             federation_id,
             session_index,
             &session_outcome,
@@ -93,5 +157,8 @@ pub async fn run_fetcher(
         }
     }
 
-    unreachable!("Session stream should never end")
+    // The stream drained `next_session..count` fully and in order (`buffered`
+    // preserves input order), so every session up to `count - 1` is now
+    // ingested; the caller re-reads `session_count` from here.
+    Ok(count)
 }
