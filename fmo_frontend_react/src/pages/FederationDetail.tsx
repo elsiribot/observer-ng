@@ -7,6 +7,7 @@ import { Badge } from '../components/Badge';
 import { Alert } from '../components/Alert';
 import { Copyable } from '../components/Copyable';
 import { SessionsTab } from '../components/explorer/SessionsTab';
+import { ConsensusTab } from '../components/explorer/ConsensusTab';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
@@ -64,7 +65,7 @@ export function FederationDetail() {
   const [utxos, setUtxos] = useState<UTXO[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'activity' | 'sessions' | 'utxos' | 'config'>('activity');
+  const [activeTab, setActiveTab] = useState<'activity' | 'sessions' | 'consensus' | 'utxos' | 'config'>('activity');
   const [utxosLoading, setUtxosLoading] = useState(false);
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState('');
@@ -537,6 +538,16 @@ export function FederationDetail() {
               Sessions
             </button>
             <button
+              onClick={() => setActiveTab('consensus')}
+              className={`border-b-2 py-3 sm:py-4 px-1 text-xs sm:text-sm font-medium whitespace-nowrap ${
+                activeTab === 'consensus'
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+              }`}
+            >
+              Consensus
+            </button>
+            <button
               onClick={() => setActiveTab('utxos')}
               className={`border-b-2 py-3 sm:py-4 px-1 text-xs sm:text-sm font-medium whitespace-nowrap ${
                 activeTab === 'utxos'
@@ -677,6 +688,12 @@ export function FederationDetail() {
           {activeTab === 'sessions' && id && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
               <SessionsTab federationId={id} />
+            </div>
+          )}
+
+          {activeTab === 'consensus' && id && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
+              <ConsensusTab federationId={id} />
             </div>
           )}
 
