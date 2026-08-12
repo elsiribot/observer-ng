@@ -74,6 +74,8 @@ export const api = {
 
   getFederations: () => request<FederationSummary[]>('/federations'),
 
+  getFederationSummary: (id: string) => request<FederationSummary>(`/federations/${id}/summary`),
+
   getNostrFederations: () => request<Record<string, string>>('/nostr/federations'),
 
   // Keyset-paginated session list (newest first). `before` is the

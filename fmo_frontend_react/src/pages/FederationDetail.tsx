@@ -113,13 +113,11 @@ export function FederationDetail() {
   useEffect(() => {
     if (!id) return;
 
-    // Fetch all federations and find the one matching the ID
-    api.getFederations()
-      .then((federations) => {
-        const fed = federations.find((f) => f.id === id);
-        if (!fed) {
-          throw new Error('Federation not found');
-        }
+    // Fetch just this federation's summary (not the whole fleet) and find
+    // its config. Config is fetched after the summary resolves because its
+    // invite-code fallback needs `fed.invite`.
+    api.getFederationSummary(id)
+      .then((fed) => {
         setFederation(fed);
         // Fetch config using federation ID first, fallback to invite if needed
         return fetchFederationConfig(id, fed.invite);
