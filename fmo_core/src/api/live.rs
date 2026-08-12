@@ -76,7 +76,10 @@ static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
 impl FederationObserver {
     /// Ascending, bounded keyset delta over the federation-wide tx ⊔ ci
     /// union: rows with `after < (session_index, item_index) <= up_to`.
-    /// `after = None` means no lower bound (start of the session). Reuses
+    /// `after = None` means no lower bound at all (from the very first
+    /// session); callers that only want the current live session pass
+    /// `Some((session_index, -1))` as the lower bound instead, as the `/live`
+    /// SSE handler below does. Reuses
     /// SP-1's enriched item shape (`ConsensusItemRow`, `USER_TX_LATERAL`) so
     /// live items carry the same `user_tx_key`/`user_tx_kind`/`direction`
     /// gold classification as the historical consensus explorer.
