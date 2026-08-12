@@ -283,26 +283,23 @@ async fn fetcher_resume_skips_open_session_regression() {
     .unwrap();
     drop(conn);
 
-    // The fix: filtering on `data IS NOT NULL` must resume on the still-open
-    // session 3 (`next_session` would become `3`), not skip past it.
-    let conn = pool.get().await.unwrap();
-    let max_complete = fmo_core::query::query_value::<Option<i32>>(
-        &conn,
-        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
-        &[&fed],
-    )
-    .await
-    .unwrap();
+    // Exercise the PRODUCTION resume computation directly (not a copy of its
+    // SQL), so this test fails if the `data IS NOT NULL` filter is ever
+    // dropped from `fetch::next_session_to_fetch`. It must resume ON the
+    // still-open session 3, not skip past it to 4.
+    let next_session = fmo_core::fetch::next_session_to_fetch(&pool, federation_id)
+        .await
+        .unwrap();
     assert_eq!(
-        max_complete,
-        Some(2),
-        "resume point must be the last COMPLETE session, not the open one"
+        next_session, 3,
+        "fetcher must resume on the open session (3), not skip past it to 4"
     );
 
     // Documents the bug the filter prevents: without it, the open session's
     // NULL-data row is still counted by MAX(session_index), so a resuming
     // fetcher would wrongly compute `next_session = 4` and permanently skip
     // session 3.
+    let conn = pool.get().await.unwrap();
     let max_including_open = fmo_core::query::query_value::<Option<i32>>(
         &conn,
         "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1",

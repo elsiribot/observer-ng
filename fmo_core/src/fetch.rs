@@ -19,6 +19,29 @@ use crate::query::query_value;
 use crate::registry::ModuleRegistry;
 use crate::services::CoreServices;
 
+/// The session index a (re)starting fetcher should resume from: one past the
+/// highest COMPLETE (`data IS NOT NULL`) session, or 0 if none exist yet.
+///
+/// The `data IS NOT NULL` filter is load-bearing: the live path leaves the
+/// currently-open session as a `data = NULL` row for its whole lifetime, so an
+/// unfiltered `MAX(session_index)` would resume PAST the open session on every
+/// restart — permanently orphaning it (never finalized, dispatch/gold skip it).
+/// Mirrors the same filter on `dispatch.rs`'s pending-range query.
+pub async fn next_session_to_fetch(
+    pool: &Pool,
+    federation_id: FederationId,
+) -> anyhow::Result<u64> {
+    let next_session = query_value::<Option<i32>>(
+        &pool.get().await?,
+        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
+        &[&federation_id.consensus_encode_to_vec()],
+    )
+    .await?
+    .map(|max_session_index| max_session_index as u64 + 1)
+    .unwrap_or(0);
+    Ok(next_session)
+}
+
 /// Fetches sessions from the federation and writes raw session data plus
 /// structural facts into the core tables. Does NOT do any module-specific
 /// decoding — that is the dispatch engine's job.
@@ -47,14 +70,7 @@ pub async fn run_fetcher(
     let decoders = ModuleRegistry::fallback_decoders();
 
     info!("Starting session fetcher for {federation_id}");
-    let mut next_session = query_value::<Option<i32>>(
-        &pool.get().await?,
-        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
-        &[&federation_id.consensus_encode_to_vec()],
-    )
-    .await?
-    .map(|max_session_index| max_session_index as u64 + 1)
-    .unwrap_or(0);
+    let mut next_session = next_session_to_fetch(&pool, federation_id).await?;
     debug!("Next session {next_session}");
 
     loop {
