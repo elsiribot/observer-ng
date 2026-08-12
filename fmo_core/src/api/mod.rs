@@ -173,6 +173,14 @@ impl FederationObserver {
                 .await?;
         }
 
+        // Refresh the fleet-wide guardian-health cache BEFORE totals, since
+        // compute_totals reads it (to discount offline federations). Best-effort:
+        // handlers fall back to computing on demand if the cache is empty.
+        match self.compute_guardian_health_summary().await {
+            Ok(health) => *self.cached_health_summary().write().await = Some(health),
+            Err(e) => debug!("Error while refreshing cached guardian health: {e:?}"),
+        }
+
         // Refresh the `/federations/totals` cache. Best-effort: a failure
         // here shouldn't abort the matview refresh cycle, since the totals
         // handler falls back to computing on demand if the cache is empty.

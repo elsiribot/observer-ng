@@ -42,6 +42,17 @@ pub struct FederationObserver {
     /// the `/federations/totals` handler avoids a full-table scan on every
     /// request. `None` until the first refresh cycle completes.
     cached_totals: Arc<tokio::sync::RwLock<Option<fmo_api_types::FedimintTotals>>>,
+    /// Cached fleet-wide guardian health, refreshed on the same cycle as the
+    /// materialized views (`refresh_views_inner`). Recomputing it is a full
+    /// scan of the append-only `guardian_health` table, and it's read on every
+    /// home-page and `/summary` load, so serve it from cache. `None` until the
+    /// first refresh cycle completes (callers fall back to computing on
+    /// demand).
+    cached_health_summary: Arc<
+        tokio::sync::RwLock<
+            Option<std::collections::BTreeMap<FederationId, fmo_api_types::FederationHealth>>,
+        >,
+    >,
 }
 
 impl FederationObserver {
@@ -91,6 +102,7 @@ impl FederationObserver {
             consensus_meta_cache: Default::default(),
             live_states: Arc::new(Mutex::new(HashMap::new())),
             cached_totals: Arc::new(tokio::sync::RwLock::new(None)),
+            cached_health_summary: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Ok(observer)
@@ -160,6 +172,17 @@ impl FederationObserver {
         &self,
     ) -> &Arc<tokio::sync::RwLock<Option<fmo_api_types::FedimintTotals>>> {
         &self.cached_totals
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn cached_health_summary(
+        &self,
+    ) -> &Arc<
+        tokio::sync::RwLock<
+            Option<std::collections::BTreeMap<FederationId, fmo_api_types::FederationHealth>>,
+        >,
+    > {
+        &self.cached_health_summary
     }
 
     /// Live-poll watermark receiver for `federation_id`, if its fetcher has

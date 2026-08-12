@@ -209,7 +209,29 @@ impl FederationObserver {
             .collect())
     }
 
+    /// Returns the cached fleet-wide guardian health, refreshed on the matview
+    /// refresh cycle (see `refresh_views_inner`). Before the first refresh
+    /// cycle completes, computes and caches it on demand so a freshly started
+    /// process still serves health immediately. This is read on every home-page
+    /// and `/summary` load, so it must not hit the (full-scan) query each time.
     pub async fn get_guardian_health_summary(
+        &self,
+    ) -> anyhow::Result<BTreeMap<FederationId, FederationHealth>> {
+        if let Some(health) = self.cached_health_summary().read().await.clone() {
+            return Ok(health);
+        }
+
+        let health = self.compute_guardian_health_summary().await?;
+        *self.cached_health_summary().write().await = Some(health.clone());
+        Ok(health)
+    }
+
+    /// Computes the fleet-wide guardian health from scratch. Expensive: scans
+    /// the append-only `guardian_health` table in full to find each guardian's
+    /// latest sample. Called on the matview refresh cycle
+    /// (`refresh_views_inner`) and, as a fallback, by
+    /// [`Self::get_guardian_health_summary`] before the cache is warm.
+    pub async fn compute_guardian_health_summary(
         &self,
     ) -> anyhow::Result<BTreeMap<FederationId, FederationHealth>> {
         #[derive(FromRow)]
