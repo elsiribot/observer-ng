@@ -139,6 +139,8 @@ async fn session_page_and_items() {
         items[0].user_tx_key.as_deref(),
         Some(hex::encode(b"tx_zero")).as_deref()
     );
+    assert_eq!(items[0].user_tx_kind.as_deref(), Some("dummy"));
+    assert_eq!(items[0].direction.as_deref(), Some("internal"));
     assert!(items[0].kind.is_none());
     assert!(items[0].details.is_none());
 
@@ -150,4 +152,6 @@ async fn session_page_and_items() {
     assert_eq!(items[1].details, Some(json!({"foo": "bar"})));
     assert!(items[1].txid.is_none());
     assert!(items[1].user_tx_key.is_none());
+    assert!(items[1].user_tx_kind.is_none());
+    assert!(items[1].direction.is_none());
 }

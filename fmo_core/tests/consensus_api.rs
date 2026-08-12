@@ -110,7 +110,14 @@ async fn consensus_stream_filters_and_paging() {
         page1.items[0].user_tx_key.as_deref(),
         Some(hex::encode(b"tx_c")).as_deref()
     );
+    assert_eq!(page1.items[0].user_tx_kind.as_deref(), Some("dummy"));
+    assert_eq!(page1.items[0].direction.as_deref(), Some("internal"));
     assert_eq!(page1.items[1].kind.as_deref(), Some("ln"));
+    // tx_b (item [2]) is not linked to any user transaction: orphan tx.
+    assert_eq!(page1.items[2].item_type, "transaction");
+    assert!(page1.items[2].user_tx_key.is_none());
+    assert!(page1.items[2].user_tx_kind.is_none());
+    assert!(page1.items[2].direction.is_none());
     assert_eq!(page1.next, Some((1, 0)));
 
     // --- filter=all, page 2: remaining 2 items, using the returned cursor ---
@@ -156,6 +163,11 @@ async fn consensus_stream_filters_and_paging() {
     );
     assert!(tx_page.items.iter().all(|i| i.item_type == "transaction"));
     assert_eq!(tx_page.next, None);
+    // tx_c (session 2) is linked to a user transaction; tx_a/tx_b are orphans.
+    assert_eq!(tx_page.items[0].user_tx_kind.as_deref(), Some("dummy"));
+    assert_eq!(tx_page.items[0].direction.as_deref(), Some("internal"));
+    assert!(tx_page.items[1].user_tx_kind.is_none());
+    assert!(tx_page.items[2].user_tx_kind.is_none());
 
     // --- filter=<kind>: consensus items of that kind only ---
     let ln_page = observer
@@ -166,6 +178,8 @@ async fn consensus_stream_filters_and_paging() {
     assert_eq!(ln_page.items[0].session_index, 1);
     assert_eq!(ln_page.items[0].item_index, 1);
     assert_eq!(ln_page.items[0].kind.as_deref(), Some("ln"));
+    assert!(ln_page.items[0].user_tx_kind.is_none());
+    assert!(ln_page.items[0].direction.is_none());
 
     let wallet_page = observer
         .federation_consensus_page(federation_id, "wallet", None, 50)

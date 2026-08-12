@@ -152,6 +152,13 @@ pub struct SessionItem {
     pub peer_id: Option<i32>,
     pub txid: Option<String>,
     pub user_tx_key: Option<String>,
+    /// The gold-layer `user_transactions.kind` this tx belongs to (e.g.
+    /// `"peg_in"`, `"ln_send"`), or `None` for CI items and orphan
+    /// transactions not (yet) folded into a user transaction.
+    pub user_tx_kind: Option<String>,
+    /// "in" | "out" | "internal", mirroring `user_transactions.direction`;
+    /// `None` alongside `user_tx_kind`.
+    pub direction: Option<String>,
     pub details: Option<serde_json::Value>,
 }
 

@@ -6,7 +6,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Badge } from '../Badge';
+import { Badge, type BadgeLevel } from '../Badge';
 import { api } from '../../services/api';
 import { formatNumber } from '../../utils/format';
 import type { SessionItem, TxDetail } from '../../types/api';
@@ -33,6 +33,44 @@ function shorten(hex: string, chars = 8): string {
 
 // ---- Transaction row -------------------------------------------------
 
+// Maps the gold-layer `user_transactions.kind` (see `fmo_core/src/gold.rs`)
+// to a friendly label + badge level for the explorer's transaction rows.
+// A `user_tx_kind` outside this map (or null — not yet folded into a gold
+// user transaction) falls back to a neutral "Transaction" badge below.
+const USER_TX_KIND_LABELS: Record<string, { label: string; level: BadgeLevel }> = {
+  peg_in: { label: 'Peg-in', level: 'success' },
+  peg_out: { label: 'Peg-out', level: 'success' },
+  ln_send: { label: 'LN Send', level: 'success' },
+  ln_receive: { label: 'LN Receive', level: 'success' },
+  ecash_transfer: { label: 'Ecash', level: 'success' },
+  lnv2_send: { label: 'LN Send (v2)', level: 'success' },
+  lnv2_receive: { label: 'LN Receive (v2)', level: 'success' },
+  peg_in_v2: { label: 'Peg-in (v2)', level: 'success' },
+  peg_out_v2: { label: 'Peg-out (v2)', level: 'success' },
+  ecash_transfer_v2: { label: 'Ecash (v2)', level: 'success' },
+  stability_pool: { label: 'Stability Pool', level: 'success' },
+};
+
+function classificationBadge(userTxKind: string | null): { label: string; level: BadgeLevel } {
+  if (userTxKind && userTxKind in USER_TX_KIND_LABELS) {
+    return USER_TX_KIND_LABELS[userTxKind];
+  }
+  return { label: 'Transaction', level: 'success' };
+}
+
+function directionHint(direction: string | null): string | null {
+  switch (direction) {
+    case 'in':
+      return 'in';
+    case 'out':
+      return 'out';
+    case 'internal':
+      return 'internal';
+    default:
+      return null;
+  }
+}
+
 function TransactionRow({ item }: { item: SessionItem }) {
   const { id: federationId } = useParams<{ id: string }>();
   const [expanded, setExpanded] = useState(false);
@@ -56,10 +94,16 @@ function TransactionRow({ item }: { item: SessionItem }) {
     }
   };
 
+  const badge = classificationBadge(item.user_tx_kind);
+  const direction = directionHint(item.direction);
+
   return (
     <div className="py-3">
       <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-        <Badge level="success">Transaction</Badge>
+        <Badge level={badge.level}>{badge.label}</Badge>
+        {direction && (
+          <span className="text-xs text-gray-500 dark:text-gray-400 capitalize">{direction}</span>
+        )}
         <span
           className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate"
           title={item.txid ?? undefined}

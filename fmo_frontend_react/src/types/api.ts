@@ -57,7 +57,7 @@ export interface SessionSummary {
   session_index: number;
   estimated_time: number | null;
   tx_count: number;
-  items_by_kind: Record<string, number>;
+  items_by_kind: Record<string, unknown>;
 }
 
 /// One item (a transaction or a consensus item) within a session's ordered
@@ -71,6 +71,12 @@ export interface SessionItem {
   peer_id: number | null;
   txid: string | null;
   user_tx_key: string | null;
+  /** The gold-layer user transaction's `kind` (e.g. "peg_in", "ln_send"),
+   * or null for CI items and transactions not (yet) folded into a user
+   * transaction. */
+  user_tx_kind: string | null;
+  /** "in" | "out" | "internal", null alongside `user_tx_kind`. */
+  direction: string | null;
   details: Record<string, unknown> | null;
 }
 

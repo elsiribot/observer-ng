@@ -55,6 +55,8 @@ struct ConsensusItemRow {
     peer_id: Option<i32>,
     txid: Option<String>,
     user_tx_key: Option<String>,
+    user_tx_kind: Option<String>,
+    direction: Option<String>,
     details: Option<serde_json::Value>,
 }
 
@@ -68,20 +70,33 @@ impl From<ConsensusItemRow> for SessionItem {
             peer_id: row.peer_id,
             txid: row.txid,
             user_tx_key: row.user_tx_key,
+            user_tx_kind: row.user_tx_kind,
+            direction: row.direction,
             details: row.details,
         }
     }
 }
 
+// Each transaction-producing query below resolves `user_tx_key` +
+// `user_tx_kind` + `direction` together via a single LATERAL join, avoiding
+// row multiplication if a txid ever maps to more than one user_tx_key
+// (LIMIT 1) and avoiding three separate correlated subqueries.
 // language=postgresql
 const TRANSACTION_ONLY_QUERY: &str = "
     SELECT t.session_index::bigint, t.item_index::bigint, 'transaction' AS item_type,
            NULL::text AS kind, NULL::int AS peer_id,
            encode(t.txid,'hex') AS txid,
-           (SELECT encode(utt.user_tx_key,'hex') FROM user_transaction_txs utt
-            WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid LIMIT 1) AS user_tx_key,
+           uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details
     FROM transactions t
+    LEFT JOIN LATERAL (
+        SELECT encode(utt.user_tx_key,'hex') AS user_tx_key, ut.kind AS user_tx_kind, ut.direction
+        FROM user_transaction_txs utt
+        JOIN user_transactions ut
+          ON ut.federation_id = utt.federation_id AND ut.user_tx_key = utt.user_tx_key
+        WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid
+        LIMIT 1
+    ) uxt ON true
     WHERE t.federation_id = $1
       AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
     ORDER BY t.session_index DESC, t.item_index DESC
@@ -94,14 +109,21 @@ const ALL_QUERY: &str = "
         SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                encode(t.txid,'hex') AS txid,
-               (SELECT encode(utt.user_tx_key,'hex') FROM user_transaction_txs utt
-                WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid LIMIT 1) AS user_tx_key,
+               uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                NULL::jsonb AS details
         FROM transactions t
+        LEFT JOIN LATERAL (
+            SELECT encode(utt.user_tx_key,'hex') AS user_tx_key, ut.kind AS user_tx_kind, ut.direction
+            FROM user_transaction_txs utt
+            JOIN user_transactions ut
+              ON ut.federation_id = utt.federation_id AND ut.user_tx_key = utt.user_tx_key
+            WHERE utt.federation_id = t.federation_id AND utt.txid = t.txid
+            LIMIT 1
+        ) uxt ON true
         WHERE t.federation_id = $1
         UNION ALL
         SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-               NULL, NULL, ci.details
+               NULL, NULL, NULL, NULL, ci.details
         FROM consensus_items ci
         WHERE ci.federation_id = $1
     ) combined
@@ -113,7 +135,8 @@ const ALL_QUERY: &str = "
 // language=postgresql
 const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
-           NULL::text AS txid, NULL::text AS user_tx_key, ci.details
+           NULL::text AS txid, NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
+           ci.details
     FROM consensus_items ci
     WHERE ci.federation_id = $1 AND ci.kind = $2
       AND ($3::int IS NULL OR (ci.session_index, ci.item_index) < ($3::int, $4::int))

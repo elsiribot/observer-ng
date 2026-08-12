@@ -22,6 +22,8 @@ const baseItem: SessionItem = {
   peer_id: null,
   txid: null,
   user_tx_key: null,
+  user_tx_kind: null,
+  direction: null,
   details: null,
 };
 
@@ -37,6 +39,34 @@ describe('renderItem', () => {
     expect(screen.getByText('Transaction')).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /part of user transaction/i });
     expect(link).toHaveAttribute('href', '/federations/fed1/user-transactions/deadbeefcafe');
+  });
+
+  it('renders the gold-layer classification badge for a known user_tx_kind', () => {
+    renderWithRouter({
+      ...baseItem,
+      item_type: 'transaction',
+      txid: 'abc123txiddeadbeef',
+      user_tx_key: 'deadbeefcafe',
+      user_tx_kind: 'ln_send',
+      direction: 'out',
+    });
+
+    expect(screen.getByText('LN Send')).toBeInTheDocument();
+    expect(screen.queryByText('Transaction')).not.toBeInTheDocument();
+  });
+
+  it('falls back to a generic "Transaction" badge when user_tx_kind is null', () => {
+    expect(() =>
+      renderWithRouter({
+        ...baseItem,
+        item_type: 'transaction',
+        txid: 'abc123txiddeadbeef',
+        user_tx_key: null,
+        user_tx_kind: null,
+      })
+    ).not.toThrow();
+
+    expect(screen.getByText('Transaction')).toBeInTheDocument();
   });
 
   it('does not render the user-tx link when user_tx_key is absent', () => {
