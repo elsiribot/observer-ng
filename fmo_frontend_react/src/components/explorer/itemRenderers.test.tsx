@@ -119,6 +119,33 @@ describe('renderItem', () => {
     expect(pre?.textContent).toContain('SomeVariant');
   });
 
+  it('shows the variant tag as a label above the raw-JSON fallback for an unknown variant', () => {
+    const { container } = renderWithRouter({
+      ...baseItem,
+      kind: 'stability_pool',
+      peer_id: 1,
+      details: { SomeVariant: { foo: 'bar' } },
+    });
+
+    expect(screen.getByText('SomeVariant')).toBeInTheDocument();
+    expect(container.querySelector('pre')).toBeInTheDocument();
+  });
+
+  it('links a DecryptPreimage contract id to its user-transaction page', () => {
+    renderWithRouter({
+      ...baseItem,
+      kind: 'ln',
+      details: { DecryptPreimage: ['contractid1234567890', 'other'] },
+    });
+
+    const link = screen.getByTitle('contractid1234567890');
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute(
+      'href',
+      '/federations/fed1/user-transactions/contractid1234567890'
+    );
+  });
+
   it('never throws on an unexpected details shape for a known kind', () => {
     expect(() =>
       renderWithRouter({

@@ -270,6 +270,30 @@ function TxPartsList({ title, parts }: { title: string; parts: TxDetail['inputs'
   );
 }
 
+// Renders a contract id, cross-linked to the gold-layer user-transaction page
+// (LN's dedup grain is `contract_id`, see `fmo_core/src/gold.rs`) when a
+// federation id is available from the route; otherwise falls back to plain
+// mono text so this still works outside a `/federations/:id/*` route.
+export function ContractLink({ id }: { id: string }) {
+  const { id: federationId } = useParams<{ id: string }>();
+  if (!federationId) {
+    return (
+      <span className="font-mono text-xs" title={id}>
+        {shorten(id)}
+      </span>
+    );
+  }
+  return (
+    <Link
+      to={`/federations/${federationId}/user-transactions/${id}`}
+      className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline"
+      title={id}
+    >
+      {shorten(id)}
+    </Link>
+  );
+}
+
 // ---- Consensus item row -----------------------------------------------
 
 function ConsensusItemRow({ item }: { item: SessionItem }) {
@@ -321,15 +345,21 @@ function renderCiBody(item: SessionItem): ReactNode {
 }
 
 function RawFallback({ details }: { details: unknown }) {
+  const variant = singleVariant(details);
   return (
-    <details>
-      <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
-        Raw details
-      </summary>
-      <pre className="mt-1 text-xs overflow-x-auto whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-900 p-2 rounded">
-        {JSON.stringify(details, null, 2)}
-      </pre>
-    </details>
+    <>
+      {variant && (
+        <span className="mr-2 text-xs text-gray-500 dark:text-gray-400">{variant.tag}</span>
+      )}
+      <details className="inline-block align-middle">
+        <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
+          Raw details
+        </summary>
+        <pre className="mt-1 text-xs overflow-x-auto whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-900 p-2 rounded">
+          {JSON.stringify(details, null, 2)}
+        </pre>
+      </details>
+    </>
   );
 }
 
@@ -372,10 +402,7 @@ function renderLn(details: unknown): ReactNode | null {
       if (typeof contractId !== 'string') return null;
       return (
         <>
-          Preimage decryption share for contract{' '}
-          <span className="font-mono text-xs" title={contractId}>
-            {shorten(contractId)}
-          </span>
+          Preimage decryption share for contract <ContractLink id={contractId} />
         </>
       );
     }
