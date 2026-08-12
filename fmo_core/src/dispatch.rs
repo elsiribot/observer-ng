@@ -44,7 +44,7 @@ pub async fn process_pending(
 
     let fetched = query_value::<Option<i32>>(
         &conn,
-        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1",
+        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
         &[&federation_id_bytes],
     )
     .await?;
@@ -76,7 +76,7 @@ pub async fn process_pending(
     let rows = conn
         .query(
             "SELECT session_index, data FROM sessions
-             WHERE federation_id = $1 AND session_index >= $2
+             WHERE federation_id = $1 AND session_index >= $2 AND data IS NOT NULL
              ORDER BY session_index
              LIMIT $3",
             &[&federation_id_bytes, &min_next, &(batch_limit as i64)],
