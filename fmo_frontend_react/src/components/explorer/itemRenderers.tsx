@@ -141,6 +141,58 @@ function directionHint(direction: string | null): string | null {
   }
 }
 
+// Badge levels for a tx's role in its gold user transaction's lifecycle (see
+// `fmo_core/src/gold.rs`). Unknown/future roles fall back to 'info'. Shared
+// by the explorer's item-label column and the user-transaction page's
+// member-tx rows.
+export const ROLE_BADGE_LEVELS: Record<string, BadgeLevel> = {
+  offer: 'info',
+  fund: 'success',
+  claim: 'success',
+  cancel: 'error',
+  refund: 'warning',
+  self: 'info',
+};
+
+export function roleBadgeLevel(role: string): BadgeLevel {
+  return ROLE_BADGE_LEVELS[role] ?? 'info';
+}
+
+function capitalize(text: string): string {
+  return text.length === 0 ? text : text[0].toUpperCase() + text.slice(1);
+}
+
+// Fixed-width label-column content for one `SessionItem`: the gold-kind
+// classification (+ role, when present and not 'self') for a transaction, or
+// the CI kind (+ guardian) for a consensus item. Stacked (`flex-col`) so
+// rows of varying badge counts still line up, and so bodies rendered
+// alongside via `renderItem` don't have to carry this themselves.
+export function itemLabel(item: SessionItem): ReactNode {
+  if (item.item_type === 'transaction') {
+    const badge = classificationBadge(item.user_tx_kind);
+    const direction = directionHint(item.direction);
+    return (
+      <div className="flex flex-col gap-1">
+        <Badge level={badge.level}>{badge.label}</Badge>
+        {item.role && item.role !== 'self' && (
+          <Badge level={roleBadgeLevel(item.role)}>{capitalize(item.role)}</Badge>
+        )}
+        {direction && (
+          <span className="text-xs text-gray-500 dark:text-gray-400 capitalize">{direction}</span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <Badge level="info">{item.kind ?? 'ci'}</Badge>
+      {item.peer_id !== null && item.peer_id !== undefined && (
+        <span className="text-xs text-gray-500 dark:text-gray-400">Guardian {item.peer_id}</span>
+      )}
+    </div>
+  );
+}
+
 // On-demand loader for a fedimint transaction's structured detail, shared by
 // the consensus/session item rows and the user-transaction page's member-tx
 // rows. Fetches once, the first time the row is expanded.
@@ -179,16 +231,9 @@ function TransactionRow({ item }: { item: SessionItem }) {
     error: detailError,
   } = useTxDetailToggle(federationId, item.txid);
 
-  const badge = classificationBadge(item.user_tx_kind);
-  const direction = directionHint(item.direction);
-
   return (
-    <div className="py-3">
+    <div>
       <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-        <Badge level={badge.level}>{badge.label}</Badge>
-        {direction && (
-          <span className="text-xs text-gray-500 dark:text-gray-400 capitalize">{direction}</span>
-        )}
         {item.txid && federationId ? (
           <span className="inline-flex items-center gap-1 min-w-0">
             <Link
@@ -367,17 +412,7 @@ export function ContractLink({ id }: { id: string }) {
 // ---- Consensus item row -----------------------------------------------
 
 function ConsensusItemRow({ item }: { item: SessionItem }) {
-  return (
-    <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 py-3">
-      <div className="flex items-center gap-2 shrink-0">
-        <Badge level="info">{item.kind ?? 'ci'}</Badge>
-        {item.peer_id !== null && item.peer_id !== undefined && (
-          <span className="text-xs text-gray-500 dark:text-gray-400">Guardian {item.peer_id}</span>
-        )}
-      </div>
-      <div className="flex-1 min-w-0 text-sm text-gray-900 dark:text-white">{safeCiBody(item)}</div>
-    </div>
-  );
+  return <div className="text-sm text-gray-900 dark:text-white">{safeCiBody(item)}</div>;
 }
 
 function safeCiBody(item: SessionItem): ReactNode {

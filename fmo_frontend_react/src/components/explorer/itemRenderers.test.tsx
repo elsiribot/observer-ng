@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import { renderItem, TxDetailBody } from './itemRenderers';
+import { itemLabel, renderItem, TxDetailBody } from './itemRenderers';
 import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
 
 function renderWithRouter(item: SessionItem) {
@@ -30,7 +30,7 @@ const baseItem: SessionItem = {
 };
 
 describe('renderItem', () => {
-  it('renders a transaction item with a classification badge and the user-tx link', () => {
+  it('renders the user-tx link for a transaction item', () => {
     renderWithRouter({
       ...baseItem,
       item_type: 'transaction',
@@ -38,37 +38,8 @@ describe('renderItem', () => {
       user_tx_key: 'deadbeefcafe',
     });
 
-    expect(screen.getByText('Transaction')).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /part of user transaction/i });
     expect(link).toHaveAttribute('href', '/federations/fed1/user-transactions/deadbeefcafe');
-  });
-
-  it('renders the gold-layer classification badge for a known user_tx_kind', () => {
-    renderWithRouter({
-      ...baseItem,
-      item_type: 'transaction',
-      txid: 'abc123txiddeadbeef',
-      user_tx_key: 'deadbeefcafe',
-      user_tx_kind: 'ln_send',
-      direction: 'out',
-    });
-
-    expect(screen.getByText('LN Send')).toBeInTheDocument();
-    expect(screen.queryByText('Transaction')).not.toBeInTheDocument();
-  });
-
-  it('falls back to a generic "Transaction" badge when user_tx_kind is null', () => {
-    expect(() =>
-      renderWithRouter({
-        ...baseItem,
-        item_type: 'transaction',
-        txid: 'abc123txiddeadbeef',
-        user_tx_key: null,
-        user_tx_kind: null,
-      })
-    ).not.toThrow();
-
-    expect(screen.getByText('Transaction')).toBeInTheDocument();
   });
 
   it('does not render the user-tx link when user_tx_key is absent', () => {
@@ -92,7 +63,6 @@ describe('renderItem', () => {
 
     expect(screen.getByText(/block count vote/i)).toBeInTheDocument();
     expect(screen.getByText('945,696')).toBeInTheDocument();
-    expect(screen.getByText('Guardian 2')).toBeInTheDocument();
     expect(document.querySelector('pre')).not.toBeInTheDocument();
   });
 
@@ -155,6 +125,86 @@ describe('renderItem', () => {
         details: { BlockCount: 'not-a-number' },
       })
     ).not.toThrow();
+  });
+});
+
+describe('itemLabel', () => {
+  it('renders the gold-layer classification badge for a known user_tx_kind', () => {
+    render(
+      <>
+        {itemLabel({
+          ...baseItem,
+          item_type: 'transaction',
+          user_tx_kind: 'ln_send',
+          direction: 'out',
+        })}
+      </>
+    );
+
+    expect(screen.getByText('LN Send')).toBeInTheDocument();
+    expect(screen.queryByText('Transaction')).not.toBeInTheDocument();
+  });
+
+  it('falls back to a generic "Transaction" badge when user_tx_kind is null', () => {
+    render(
+      <>
+        {itemLabel({
+          ...baseItem,
+          item_type: 'transaction',
+          user_tx_kind: null,
+        })}
+      </>
+    );
+
+    expect(screen.getByText('Transaction')).toBeInTheDocument();
+  });
+
+  it('shows both the kind and role badges for a funded LN leg', () => {
+    render(
+      <>
+        {itemLabel({
+          ...baseItem,
+          item_type: 'transaction',
+          user_tx_kind: 'ln_send',
+          role: 'fund',
+        })}
+      </>
+    );
+
+    expect(screen.getByText('LN Send')).toBeInTheDocument();
+    expect(screen.getByText('Fund')).toBeInTheDocument();
+  });
+
+  it('does not show a role badge for role "self"', () => {
+    render(
+      <>
+        {itemLabel({
+          ...baseItem,
+          item_type: 'transaction',
+          user_tx_kind: 'peg_in',
+          role: 'self',
+        })}
+      </>
+    );
+
+    expect(screen.getByText('Peg-in')).toBeInTheDocument();
+    expect(screen.queryByText('Self')).not.toBeInTheDocument();
+  });
+
+  it('shows the kind and guardian for a consensus item', () => {
+    render(
+      <>
+        {itemLabel({
+          ...baseItem,
+          item_type: 'ci',
+          kind: 'wallet',
+          peer_id: 3,
+        })}
+      </>
+    );
+
+    expect(screen.getByText('wallet')).toBeInTheDocument();
+    expect(screen.getByText('Guardian 3')).toBeInTheDocument();
   });
 });
 

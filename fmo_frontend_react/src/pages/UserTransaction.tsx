@@ -4,30 +4,16 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import type { MemberTx, UserTransaction as UserTransactionData } from '../types/api';
 import { Alert } from '../components/Alert';
-import { Badge, type BadgeLevel } from '../components/Badge';
+import { Badge } from '../components/Badge';
 import { Copyable } from '../components/Copyable';
 import {
   classificationBadge,
+  roleBadgeLevel,
   shorten,
   useTxDetailToggle,
   TxDetailBody,
 } from '../components/explorer/itemRenderers';
 import { asSats, formatNumber, formatTimestamp } from '../utils/format';
-
-// Badge levels for a member tx's role in a user transaction's lifecycle
-// (see `fmo_core/src/gold.rs`). Unknown/future roles fall back to 'info'.
-const ROLE_BADGE_LEVELS: Record<string, BadgeLevel> = {
-  offer: 'info',
-  fund: 'success',
-  claim: 'success',
-  cancel: 'error',
-  refund: 'warning',
-  self: 'info',
-};
-
-function roleBadgeLevel(role: string): BadgeLevel {
-  return ROLE_BADGE_LEVELS[role] ?? 'info';
-}
 
 // User-transaction page: the gold-layer deduplicated summary of one user
 // transaction plus every underlying fedimint transaction ("member tx") and

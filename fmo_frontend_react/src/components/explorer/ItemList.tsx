@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { SessionItem } from '../../types/api';
 import { formatTimestamp, timeAgo } from '../../utils/format';
 import { Alert } from '../Alert';
-import { renderItem } from './itemRenderers';
+import { itemLabel, renderItem } from './itemRenderers';
 
 interface ItemListProps {
   items: SessionItem[];
@@ -88,13 +88,14 @@ export function ItemList({
                   <span className="flex-1 border-t border-gray-300 dark:border-gray-600" />
                 </div>
               )}
-              <div className="flex gap-3">
+              <div className="flex items-start gap-2 sm:gap-3 py-3">
                 <span
-                  className="shrink-0 pt-3 font-mono text-[11px] leading-5 text-gray-400 dark:text-gray-500 tabular-nums"
+                  className="shrink-0 font-mono text-[11px] leading-5 text-gray-400 dark:text-gray-500 tabular-nums"
                   title={`Session ${item.session_index}, item ${item.item_index}`}
                 >
                   {item.session_index}.{item.item_index}
                 </span>
+                <div className="shrink-0 w-24 sm:w-36">{itemLabel(item)}</div>
                 <div className="flex-1 min-w-0">{renderItem(item)}</div>
               </div>
             </div>
