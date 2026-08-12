@@ -163,6 +163,9 @@ pub struct SessionItem {
     /// The item's session's estimated wall-clock time (epoch seconds), from
     /// `session_times`; `None` if the session has no time vote yet.
     pub estimated_time: Option<i64>,
+    /// The tx's role in its gold user transaction: offer/fund/claim/cancel/
+    /// refund/self; `None` for CIs and unclassified txs.
+    pub role: Option<String>,
 }
 
 /// A keyset-paginated page of the federation-wide consensus item stream.

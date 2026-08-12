@@ -81,6 +81,9 @@ export interface SessionItem {
   /** The item's session's estimated wall-clock time (unix epoch seconds),
    * or null if the session has no time vote yet. */
   estimated_time: number | null;
+  /** The tx's role in its gold user transaction: offer/fund/claim/cancel/
+   * refund/self; null for CIs and unclassified txs. */
+  role: string | null;
 }
 
 /// A keyset-paginated page of the federation-wide consensus item stream.

@@ -69,7 +69,7 @@ async fn consensus_stream_filters_and_paging() {
     .unwrap();
     conn.execute(
         "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
-         VALUES ($1, $2, $2, 'self', 2)",
+         VALUES ($1, $2, $2, 'fund', 2)",
         &[&fed, &b"tx_c".to_vec()],
     )
     .await
@@ -126,12 +126,18 @@ async fn consensus_stream_filters_and_paging() {
     );
     assert_eq!(page1.items[0].user_tx_kind.as_deref(), Some("dummy"));
     assert_eq!(page1.items[0].direction.as_deref(), Some("internal"));
+    // tx_c carries its gold-layer role.
+    assert_eq!(page1.items[0].role.as_deref(), Some("fund"));
     assert_eq!(page1.items[1].kind.as_deref(), Some("ln"));
+    // ci items never have a role.
+    assert!(page1.items[1].role.is_none());
     // tx_b (item [2]) is not linked to any user transaction: orphan tx.
     assert_eq!(page1.items[2].item_type, "transaction");
     assert!(page1.items[2].user_tx_key.is_none());
     assert!(page1.items[2].user_tx_kind.is_none());
     assert!(page1.items[2].direction.is_none());
+    // Plain, unclassified tx: no role either.
+    assert!(page1.items[2].role.is_none());
     assert_eq!(page1.next, Some((1, 0)));
     // session 2's item[0] (tx_c) forward-fills the estimated_time from
     // session 1's vote; session 1's items[1]/[2] carry it directly.
@@ -190,8 +196,11 @@ async fn consensus_stream_filters_and_paging() {
     // tx_c (session 2) is linked to a user transaction; tx_a/tx_b are orphans.
     assert_eq!(tx_page.items[0].user_tx_kind.as_deref(), Some("dummy"));
     assert_eq!(tx_page.items[0].direction.as_deref(), Some("internal"));
+    assert_eq!(tx_page.items[0].role.as_deref(), Some("fund"));
     assert!(tx_page.items[1].user_tx_kind.is_none());
     assert!(tx_page.items[2].user_tx_kind.is_none());
+    assert!(tx_page.items[1].role.is_none());
+    assert!(tx_page.items[2].role.is_none());
 
     // --- filter=<kind>: consensus items of that kind only ---
     let ln_page = observer

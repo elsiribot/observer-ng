@@ -102,6 +102,7 @@ pub(super) struct ConsensusItemRow {
     direction: Option<String>,
     details: Option<serde_json::Value>,
     estimated_time: Option<i64>,
+    role: Option<String>,
 }
 
 impl From<ConsensusItemRow> for SessionItem {
@@ -118,6 +119,7 @@ impl From<ConsensusItemRow> for SessionItem {
             direction: row.direction,
             details: row.details,
             estimated_time: row.estimated_time,
+            role: row.role,
         }
     }
 }
@@ -136,7 +138,8 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
            encode(t.txid,'hex') AS txid,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details,
-           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+           uxt.role
     FROM transactions t
     {USER_TX_LATERAL}
     LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
@@ -160,14 +163,15 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
 static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details, estimated_time
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details, estimated_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 uxt.role
           FROM transactions t
           {USER_TX_LATERAL}
           LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
@@ -178,7 +182,8 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
                  NULL, NULL, NULL, NULL, ci.details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 NULL::text AS role
           FROM consensus_items ci
           LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
           WHERE ci.federation_id = $1
@@ -197,7 +202,8 @@ const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
            NULL::text AS txid, NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
            ci.details,
-           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+           NULL::text AS role
     FROM consensus_items ci
     LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
     WHERE ci.federation_id = $1 AND ci.kind = $2

@@ -130,6 +130,7 @@ struct SessionItemRow {
     direction: Option<String>,
     details: Option<serde_json::Value>,
     estimated_time: Option<i64>,
+    role: Option<String>,
 }
 
 impl FederationObserver {
@@ -199,14 +200,16 @@ impl FederationObserver {
                    encode(t.txid,'hex') AS txid,
                    uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                    NULL::jsonb AS details,
-                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                   uxt.role
             FROM transactions t
             {USER_TX_LATERAL}
             LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
             WHERE t.federation_id=$1 AND t.session_index=$2
             UNION ALL
             SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL, NULL, NULL, ci.details,
-                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time
+                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                   NULL::text AS role
             FROM consensus_items ci
             LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
             WHERE ci.federation_id=$1 AND ci.session_index=$2
@@ -239,6 +242,7 @@ impl FederationObserver {
                 direction: row.direction,
                 details: row.details,
                 estimated_time: row.estimated_time,
+                role: row.role,
             })
             .collect())
     }
