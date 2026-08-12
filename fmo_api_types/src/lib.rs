@@ -49,8 +49,13 @@ pub struct GuardianHealth {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardianHealthLatest {
-    pub block_height: u32,
-    pub block_outdated: bool,
+    /// Bitcoin block height as reported by the guardian's `block_count_local`
+    /// endpoint. `None` for federations without a v1 wallet module (e.g.
+    /// walletv2-only ones), which don't expose a block height.
+    pub block_height: Option<u32>,
+    /// Whether the guardian's block height lags our own by more than the
+    /// tolerance. `None` when no block height is available (see above).
+    pub block_outdated: Option<bool>,
     pub session_count: u32,
     pub session_outdated: bool,
 }

@@ -86,8 +86,9 @@ impl FederationObserver {
                                 })
                                 .map(|block_count| {
                                     // Fedimint uses 1-based block heights, while bitcoind uses
-                                    // 0-based heights
-                                    block_count - 1
+                                    // 0-based heights. saturating_sub guards the (never-observed
+                                    // but possible) block_count == 0 case against u32 underflow.
+                                    block_count.saturating_sub(1)
                                 })
                         } else {
                             // No v1 wallet module (e.g. walletv2-only federation): time a second
@@ -180,20 +181,22 @@ impl FederationObserver {
         Ok(health_rows
             .into_iter()
             .map(|row| {
-                let latest = if let (Some(block_height), Some(session_count)) =
-                    (row.block_height, row.session_count)
-                {
-                    let block_height = block_height as u32;
+                // A guardian is "reporting" as soon as it returns a session
+                // count; the bitcoin block height is a separate, optional
+                // signal that walletv2-only federations never provide. Gating
+                // `latest` on `session_count` alone (not also on block height)
+                // is what lets those federations show their guardians online.
+                let latest = row.session_count.map(|session_count| {
                     let session_count = session_count as u32;
-                    Some(GuardianHealthLatest {
+                    let block_height = row.block_height.map(|bh| bh as u32);
+                    GuardianHealthLatest {
                         block_height,
-                        block_outdated: our_block_height.saturating_sub(block_height) > 6,
+                        block_outdated: block_height
+                            .map(|bh| our_block_height.saturating_sub(bh) > 6),
                         session_count,
                         session_outdated: max_session.saturating_sub(session_count) > 1,
-                    })
-                } else {
-                    None
-                };
+                    }
+                });
 
                 let health = GuardianHealth {
                     avg_uptime: row.uptime,

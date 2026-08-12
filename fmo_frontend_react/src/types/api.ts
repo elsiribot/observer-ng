@@ -37,8 +37,10 @@ export interface GuardianHealth {
 }
 
 export interface GuardianHealthLatest {
-  block_height: number;
-  block_outdated: boolean;
+  // null for federations without a v1 wallet module (walletv2-only), which
+  // don't report a bitcoin block height.
+  block_height: number | null;
+  block_outdated: boolean | null;
   session_count: number;
   session_outdated: boolean;
 }
