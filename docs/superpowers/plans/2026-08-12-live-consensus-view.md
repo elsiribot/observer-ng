@@ -114,21 +114,46 @@ The pure per-poll processing + the completion finalize, as functions the live lo
 Wire the fetcher: catch-up (`await_block`) → live (`get_session_status`); publish a per-federation watermark.
 
 **Files:**
-- Modify: `fmo_core/src/live.rs` (the loop + `Watermark`/`LiveState`)
-- Modify: `fmo_core/src/fetch.rs` (`run_fetcher` transitions to live at the tip)
-- Modify: `fmo_core/src/observer.rs` (hold `live_states: Arc<Mutex<HashMap<FederationId, watch::Receiver<Watermark>>>>`; pass the sender into the fetcher)
+- Modify: `fmo_core/src/live.rs` (add `run_live` loop + `Watermark`)
+- Modify: `fmo_core/src/fetch.rs` (`run_fetcher` catch-up → live transition; takes `&watch::Sender<Watermark>`)
+- Modify: `fmo_core/src/observer.rs` (hold `live_states` map; create the channel in `spawn_federation`, pass the sender to the fetcher, add `live_watch`)
+
+**API ground truth (verified against dep git rev 2620789, tag v0.11.1):**
+- `IGlobalFederationApi` (callable on `DynGlobalApi`): `async fn session_count(&self) -> FederationResult<u64>` (count of signed sessions → indices `[0, count)` are signed/available; index `count` is the currently-open one). `async fn get_session_status(&self, block_index: u64, decoders: &ModuleDecoderRegistry, core_api_version: ApiVersion, broadcast_public_keys: Option<&BTreeMap<PeerId, secp256k1::PublicKey>>) -> anyhow::Result<SessionStatus>`.
+- **Use V1** to avoid needing broadcast keys or signature verification: pass `core_api_version = fedimint_core::module::ApiVersion::new(0, 0)` (below the V2 threshold `0.5`) and `broadcast_public_keys = None`. The impl then calls `get_session_status_raw` (the `SESSION_STATUS_ENDPOINT` consensus request).
+- `pub enum SessionStatus { Initial, Pending(Vec<AcceptedItem>), Complete(SessionOutcome) }` — note `Complete` holds a plain `SessionOutcome` (**no** signatures via this endpoint). So the live path stores `SessionOutcome` bytes — **identical to what `ingest_session` already stores** (`session.consensus_encode_to_vec()`) — and `signature = None`. The `signature` column therefore stays NULL for live-finalized sessions (it's provenance-only/optional; the historical path never stored one either). Do NOT try to obtain a signature here.
 
 **Interfaces:**
-- Produces: `pub struct Watermark { pub session_index: i64, pub item_index: i64, pub rolled_over: bool }` (Default = all zero / no data); `FederationObserver::live_watch(&self, federation_id) -> Option<watch::Receiver<Watermark>>` (for the SSE handler in Task 5).
-- Produces: the live loop `pub async fn run_live(pool, registry, services, federation_id, config, api: DynGlobalApi, wm: watch::Sender<Watermark>, from_session: u64) -> anyhow::Result<()>`.
+- Produces: `pub struct Watermark { pub session_index: i64, pub item_index: i64, pub rolled_over: bool }` deriving `Clone, Debug, Default, PartialEq` (Default = all zero / no data yet).
+- Produces: `FederationObserver::live_watch(&self, federation_id: FederationId) -> Option<tokio::sync::watch::Receiver<Watermark>>` (for the SSE handler in Task 5).
+- Produces: `pub async fn run_live(pool: &Pool, registry: &ModuleRegistry, services: &Arc<CoreServices>, federation_id, config: &ClientConfig, api: &DynGlobalApi, decoders: &ModuleDecoderRegistry, wm: &watch::Sender<Watermark>, session_index: u64) -> anyhow::Result<()>` — live-polls ONE session until it completes, then returns (so the caller advances). `use fedimint_core::encoding::Encodable;` for `consensus_encode_to_vec`.
 
-- [ ] **Step 1: `run_live`.** Loop over session indices from `from_session`: for the current index, poll `api.get_session_status(idx, &decoders, core_api_version, broadcast_public_keys)` every `FO_LIVE_POLL_SECS` (default 1). On `Pending(items)`: if `items.len() > next_item_index`, `live_process(.., items, next_item_index)`, set `next_item_index = items.len()`, and `wm.send(Watermark{ session_index: idx as i64, item_index: items.len() as i64 - 1, rolled_over:false })`. On `Complete(signed)`: `finalize_live_session(.., signed.items(), next_item_index, &signed_data_bytes, Some(&sig_bytes))`, send a `rolled_over: true` watermark for `idx`, reset `next_item_index = 0`, advance to `idx+1`. On `Initial`: wait a poll. Log+backoff on poll errors (mirror the fetcher's `background_backoff`). (Read `SessionStatus`/`SignedSessionOutcome` accessors in fedimint-core `session_outcome.rs` for the exact item/signature getters and how to get the encoded `data` bytes.)
+- [ ] **Step 1: `Watermark` + `run_live`.** Add `Watermark` to `live.rs`. `run_live` polls one `session_index` with an in-loop `next_item_index` starting at 0, sleeping `FO_LIVE_POLL_SECS` (env, default 1) between polls:
+  - `Ok(SessionStatus::Initial)` → sleep, poll again (session not started).
+  - `Ok(SessionStatus::Pending(items))` → if `items.len() > next_item_index`: `live_process(pool, registry, services, federation_id, config, session_index, &items, next_item_index).await?`; set `next_item_index = items.len()`; `let _ = wm.send(Watermark { session_index: session_index as i64, item_index: items.len() as i64 - 1, rolled_over: false });`. Then sleep, poll again.
+  - `Ok(SessionStatus::Complete(outcome))` → `let data = outcome.consensus_encode_to_vec(); finalize_live_session(pool, registry, services, federation_id, config, session_index, &outcome.items, next_item_index, &data, None).await?;` then `let _ = wm.send(Watermark { session_index: session_index as i64, item_index: outcome.items.len().saturating_sub(1) as i64, rolled_over: true });` and `return Ok(())`.
+  - `Err(e)` → `warn!` and sleep a poll interval (transient guardian/network hiccup; the outer fetcher restart-loop is the hard-failure backstop).
 
-- [ ] **Step 2: `run_fetcher` transition.** After the bulk `await_block` loop reaches the current tip (`session_index >= api.session_count() - 1`), hand off to `run_live` starting at that session, publishing to the federation's watch sender. (Keep bulk `await_block` for the catch-up phase; only switch at the tip. `run_processor`/`run_gold_processor` keep handling `< tip` complete sessions — they skip open sessions via Task 1's `data IS NOT NULL` filter, and find `module_progress` already advanced past a session the live path finalized.)
+- [ ] **Step 2: `run_fetcher` transition.** Restructure `run_fetcher`'s body into an outer loop that alternates catch-up and live (replacing the single infinite `buffered(32)` stream):
+  ```
+  loop {
+      let count = api.session_count().await?;            // [0,count) signed; `count` is open
+      if next_session < count {
+          // BULK CATCH-UP: keep the existing buffered(32) await_block stream,
+          // but BOUNDED to `next_session..count` (not `next_session..`). Ingest each via ingest_session.
+          // After the stream drains, `continue` to re-read session_count (more may have signed meanwhile).
+          continue;
+      }
+      // CAUGHT UP: session `next_session` (== count) is the open one. Go live on it.
+      run_live(&pool, &registry, &services, federation_id, &config, &api, &decoders, watermark_tx, next_session).await?;
+      next_session += 1;   // it completed; advance
+  }
+  ```
+  `run_fetcher` now also needs `registry: ModuleRegistry` + `services: Arc<CoreServices>` params (for `run_live`→`live_process`), plus `watermark_tx: &watch::Sender<Watermark>`. `run_processor`/`run_gold_processor` keep handling `< tip` complete sessions — they skip open sessions via Task 1's `data IS NOT NULL` filter, and find `module_progress` already advanced past a session the live path finalized (or advance it themselves if they were behind — see Task 3's conditional cursor advance).
 
-- [ ] **Step 3: Observer wiring.** In `observer.rs`, add the `live_states` map; in `spawn_federation`, create a `watch::channel(Watermark::default())`, store the receiver in `live_states`, and pass the sender to `run_fetcher`. Add `live_watch(&self, fed)`.
+- [ ] **Step 3: Observer wiring.** Add `live_states: Arc<std::sync::Mutex<HashMap<FederationId, watch::Receiver<Watermark>>>>` to the `FederationObserver` struct (init empty in BOTH `new` and `new_without_tasks`). In `spawn_federation`: `let (wm_tx, wm_rx) = watch::channel(Watermark::default());` then `self.live_states.lock().unwrap().insert(federation_id, wm_rx);` and move `wm_tx` into the fetcher restart-loop closure, passing `&wm_tx` to each `run_fetcher` call (the closure owns `wm_tx` for `'static`; `watch::Sender` is not `Clone`, so pass by reference — `run_fetcher` borrows it per call). The fetcher spawn also now needs `observer.registry.clone()` and `observer.services.clone()` passed in. Add `pub fn live_watch(&self, federation_id: FederationId) -> Option<watch::Receiver<Watermark>> { self.live_states.lock().unwrap().get(&federation_id).cloned() }`.
 
-- [ ] **Step 4:** This task is network-facing (`get_session_status`), so it stays integration-tested in deployment like the fetcher; the DB-mutating functions are covered by Task 3. Gate: `just clippy` clean, `just test_package fmo_core` still green (no regressions). **Commit.**
+- [ ] **Step 4:** Network-facing (`get_session_status`), so integration-tested in deployment like the fetcher; the DB-mutating functions are covered by Task 3. Gate: `nix develop -c just clippy` clean, `nix develop -c just test_package fmo_core` still green (no regressions — the `incremental`/`live` tests and existing suite). **Commit.**
 
 ---
 
