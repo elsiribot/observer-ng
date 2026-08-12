@@ -96,6 +96,61 @@ impl ObserverModule for TestModule {
     }
 }
 
+/// A second, otherwise-inert module (no items in the fixture belong to it --
+/// there's no "laggard"-kind instance in `dummy_config`) used only to prove
+/// the conditional `module_progress` advance in `finalize_live_session`:
+/// registered alongside `TestModule` so `finalize_live_session` iterates
+/// over both, its cursor is pre-seeded *behind* `session_index`, and the
+/// test asserts it is left untouched (0 rows matched by the conditional
+/// `UPDATE`) while `TestModule`'s caught-up cursor does advance.
+struct LaggardModule;
+
+#[async_trait::async_trait]
+impl ObserverModule for LaggardModule {
+    fn kind(&self) -> ModuleKind {
+        ModuleKind::from_static_str("laggard")
+    }
+
+    fn decoder(&self) -> Decoder {
+        Decoder::builder().build()
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn migrations(&self) -> &'static [Migration] {
+        &[]
+    }
+
+    async fn process_input(
+        &self,
+        _ctx: &mut ProcessCtx<'_>,
+        _input: &DynInput,
+        _meta: &ItemMeta,
+    ) -> anyhow::Result<ProcessedItem> {
+        Ok(ProcessedItem::default())
+    }
+
+    async fn process_output(
+        &self,
+        _ctx: &mut ProcessCtx<'_>,
+        _output: &DynOutput,
+        _meta: &ItemMeta,
+    ) -> anyhow::Result<ProcessedItem> {
+        Ok(ProcessedItem::default())
+    }
+
+    async fn process_ci(
+        &self,
+        _ctx: &mut ProcessCtx<'_>,
+        _ci: &DynModuleConsensusItem,
+        _meta: &CiMeta,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+}
+
 /// End-to-end exercise of the two functions the live loop (a later task)
 /// will call per poll / on finalize: `live_process` incrementally as new
 /// items arrive within a still-open session, then `finalize_live_session`
@@ -114,7 +169,8 @@ async fn live_process_then_finalize() {
     let fed = federation_id.consensus_encode_to_vec();
 
     let module: Arc<dyn ObserverModule> = Arc::new(TestModule);
-    let registry = ModuleRegistry::new(vec![module]);
+    let laggard: Arc<dyn ObserverModule> = Arc::new(LaggardModule);
+    let registry = ModuleRegistry::new(vec![module, laggard]);
     fmo_core::db::migrations::setup_module_schema(
         &pool,
         "dummy",
@@ -136,7 +192,7 @@ async fn live_process_then_finalize() {
     // at item_index 0, followed by one dummy module CI at item_index 1 --
     // built by the shared `dummy_session` fixture, which already matches
     // `dummy_config`'s single "dummy" module instance.
-    let session_index = 0u64;
+    let session_index = 1u64;
     let items = dummy_session(9_001).items;
     assert_eq!(items.len(), 2, "test setup: transaction + CI");
 
@@ -186,7 +242,7 @@ async fn live_process_then_finalize() {
         let stats = conn
             .query_one(
                 "SELECT tx_count, ci_count FROM session_stats
-                 WHERE federation_id = $1 AND session_index = 0",
+                 WHERE federation_id = $1 AND session_index = 1",
                 &[&fed],
             )
             .await
@@ -206,7 +262,7 @@ async fn live_process_then_finalize() {
             .collect();
         assert_eq!(
             seen,
-            vec![(0, 0, "input".to_owned()), (0, 0, "output".to_owned())],
+            vec![(1, 0, "input".to_owned()), (1, 0, "output".to_owned())],
             "module silver rows for item 0 only"
         );
 
@@ -267,7 +323,7 @@ async fn live_process_then_finalize() {
         let stats = conn
             .query_one(
                 "SELECT tx_count, ci_count FROM session_stats
-                 WHERE federation_id = $1 AND session_index = 0",
+                 WHERE federation_id = $1 AND session_index = 1",
                 &[&fed],
             )
             .await
@@ -288,9 +344,9 @@ async fn live_process_then_finalize() {
         assert_eq!(
             seen,
             vec![
-                (0, 0, "input".to_owned()),
-                (0, 0, "output".to_owned()),
-                (0, 1, "ci".to_owned()),
+                (1, 0, "input".to_owned()),
+                (1, 0, "output".to_owned()),
+                (1, 1, "ci".to_owned()),
             ],
             "module silver rows for all items now"
         );
@@ -310,7 +366,7 @@ async fn live_process_then_finalize() {
 
         let data_is_null: bool = conn
             .query_one(
-                "SELECT data IS NULL FROM sessions WHERE federation_id = $1 AND session_index = 0",
+                "SELECT data IS NULL FROM sessions WHERE federation_id = $1 AND session_index = 1",
                 &[&fed],
             )
             .await
@@ -337,16 +393,28 @@ async fn live_process_then_finalize() {
     .await
     .unwrap();
 
-    // Pre-seed module_progress at exactly this session index, the way a
-    // separate `run_processor` that has already caught up would leave it --
-    // this is the condition under which `finalize_live_session` must
-    // actually advance the cursor.
+    // Pre-seed module_progress for both registered modules, at two
+    // different cursors, to exercise both branches of the CRITICAL
+    // conditional advance in `finalize_live_session`:
+    // - "dummy" is exactly at `session_index`, the way a separate `run_processor`
+    //   that has already caught up would leave it -- this is the condition under
+    //   which the cursor MUST advance.
+    // - "laggard" is one session behind, the way a `run_processor` that hasn't
+    //   caught up yet would leave it -- its cursor MUST NOT move, or the
+    //   un-dispatched session it's still behind on would get skipped.
     {
         let conn = pool.get().await.unwrap();
         conn.execute(
             "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
-             VALUES ('dummy', $1, 0)",
-            &[&fed],
+             VALUES ('dummy', $1, $2)",
+            &[&fed, &(session_index as i32)],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+             VALUES ('laggard', $1, $2)",
+            &[&fed, &(session_index as i32 - 1)],
         )
         .await
         .unwrap();
@@ -385,7 +453,7 @@ async fn live_process_then_finalize() {
 
         let stored_data: Option<Vec<u8>> = conn
             .query_one(
-                "SELECT data FROM sessions WHERE federation_id = $1 AND session_index = 0",
+                "SELECT data FROM sessions WHERE federation_id = $1 AND session_index = 1",
                 &[&fed],
             )
             .await
@@ -433,6 +501,23 @@ async fn live_process_then_finalize() {
             cursor,
             session_index as i32 + 1,
             "module_progress advanced past the now-finalized session"
+        );
+
+        let laggard_cursor: i32 = conn
+            .query_one(
+                "SELECT next_session_index FROM module_progress
+                 WHERE module_kind = 'laggard' AND federation_id = $1",
+                &[&fed],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            laggard_cursor,
+            session_index as i32 - 1,
+            "CRITICAL: a module that hasn't caught up to session_index yet must NOT be \
+             advanced by finalize -- otherwise the un-dispatched session(s) it's still \
+             behind on would be skipped forever"
         );
     }
 }
