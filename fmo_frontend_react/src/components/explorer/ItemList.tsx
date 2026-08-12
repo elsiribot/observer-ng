@@ -58,9 +58,36 @@ export function ItemList({
   return (
     <div>
       <div className="divide-y divide-gray-200 dark:divide-gray-700">
-        {items.map((item) => (
-          <div key={`${item.session_index}-${item.item_index}`}>{renderItem(item)}</div>
-        ))}
+        {items.map((item, idx) => {
+          // In the federation-wide consensus stream, mark where each new
+          // session begins with a labeled horizontal rule. (In session scope
+          // every item shares one session, so no dividers.)
+          const startsNewSession =
+            scope === 'consensus' &&
+            (idx === 0 || item.session_index !== items[idx - 1].session_index);
+          return (
+            <div key={`${item.session_index}-${item.item_index}`}>
+              {startsNewSession && (
+                <div
+                  className="flex items-center gap-2 pt-3 pb-1 text-xs font-mono text-gray-400 dark:text-gray-500"
+                  aria-label={`Session ${item.session_index}`}
+                >
+                  <span className="shrink-0">Session {item.session_index}</span>
+                  <span className="flex-1 border-t border-gray-300 dark:border-gray-600" />
+                </div>
+              )}
+              <div className="flex gap-3">
+                <span
+                  className="shrink-0 pt-3 font-mono text-[11px] leading-5 text-gray-400 dark:text-gray-500 tabular-nums"
+                  title={`Session ${item.session_index}, item ${item.item_index}`}
+                >
+                  {item.session_index}.{item.item_index}
+                </span>
+                <div className="flex-1 min-w-0">{renderItem(item)}</div>
+              </div>
+            </div>
+          );
+        })}
       </div>
       {loading && (
         <div className="text-center text-xs sm:text-sm text-gray-500 dark:text-gray-400 py-4">
