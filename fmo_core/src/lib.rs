@@ -10,6 +10,7 @@ pub mod gateway_poll;
 pub mod gold;
 pub mod import;
 pub mod ingest;
+pub mod live;
 pub mod module;
 pub mod observer;
 pub mod registry;
