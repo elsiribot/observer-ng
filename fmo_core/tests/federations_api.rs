@@ -5,12 +5,12 @@ use fedimint_core::encoding::Encodable;
 use fmo_core::observer::FederationObserver;
 use fmo_core::registry::ModuleRegistry;
 
-/// Regression test for the histogram query fix: the `transaction_inputs`
-/// subquery now has `WHERE federation_id = $1`, narrowing it from a
-/// fleet-wide scan to a per-federation one. Two federations share the same
-/// session/date so a broken (unfiltered or over-filtered) join would either
-/// double-count or drop amounts; verify each federation's histogram only
-/// reflects its own inputs.
+/// Regression test for per-federation histogram isolation. The histogram is
+/// now served from the `federation_tx_daily` matview, which groups by
+/// `federation_id`. Two federations share the same session/date and txid bytes
+/// so a matview that failed to key on `federation_id` would double-count or
+/// drop amounts; verify each federation's histogram only reflects its own
+/// inputs.
 #[tokio::test]
 async fn histogram_is_isolated_per_federation() {
     let _guard = DB_LOCK.lock().await;
@@ -109,6 +109,13 @@ async fn histogram_is_isolated_per_federation() {
     )
     .await
     .unwrap();
+
+    // The histogram reads the `federation_tx_daily` matview, which depends on
+    // both `session_times` (refreshed above) and the transactions/inputs just
+    // inserted, so it must be refreshed before querying.
+    conn.batch_execute("REFRESH MATERIALIZED VIEW federation_tx_daily")
+        .await
+        .unwrap();
     drop(conn);
 
     let registry = ModuleRegistry::new(vec![]);

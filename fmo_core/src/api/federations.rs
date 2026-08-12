@@ -326,20 +326,28 @@ impl FederationObserver {
 
         let now = chrono::offset::Utc::now();
 
+        // Served from the `federation_tx_daily` matview (schema/core/v5.sql),
+        // which precomputes this per-day aggregate for every federation. This
+        // used to run a correlated per-tx input-sum aggregate live, once per
+        // federation on the home page (73x). We fetch a slightly wider window
+        // than requested and `last_n_day_iter` below selects the exact days.
         // language=postgresql
-        let activity = query::<FederationActivityRow>(&self.connection().await?, "
-            SELECT DATE(st.estimated_session_timestamp) AS date,
-                   COUNT(DISTINCT t.txid)::bigint       AS tx_count,
-                   COALESCE(SUM((SELECT SUM(amount_msat)
-                        FROM transaction_inputs
-                        WHERE transaction_inputs.txid = t.txid AND transaction_inputs.federation_id = t.federation_id))::bigint, 0)   AS total_amount
-            FROM transactions t
-                     JOIN
-                 session_times st ON t.session_index = st.session_index AND t.federation_id = st.federation_id
-            WHERE t.federation_id = $1  AND st.estimated_session_timestamp >= $2
-            GROUP BY date
-            ORDER BY date;
-        ", &[&federation_id.consensus_encode_to_vec(), &(now - chrono::Duration::days(8)).naive_utc()]).await?;
+        let activity = query::<FederationActivityRow>(
+            &self.connection().await?,
+            "
+            SELECT day         AS date,
+                   tx_count    AS tx_count,
+                   volume_msat AS total_amount
+            FROM federation_tx_daily
+            WHERE federation_id = $1 AND day >= $2
+            ORDER BY day;
+        ",
+            &[
+                &federation_id.consensus_encode_to_vec(),
+                &(now - chrono::Duration::days(8)).date_naive(),
+            ],
+        )
+        .await?;
 
         Ok(last_n_day_iter(now.date_naive(), days)
             .map(|date| {

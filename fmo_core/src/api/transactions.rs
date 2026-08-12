@@ -202,24 +202,18 @@ impl FederationObserver {
         &self,
         federation_id: FederationId,
     ) -> anyhow::Result<Vec<HistogramEntry>> {
+        // Served from the `federation_tx_daily` matview (see schema/core/v5.sql),
+        // which precomputes this exact per-day aggregate for every federation on
+        // the refresh cycle. Previously this recomputed the whole-history
+        // aggregate live on each request (10-18s on busy federations).
         // language=postgresql
         const QUERY: &str = "
-            SELECT DATE(st.estimated_session_timestamp)            AS date,
-                   COUNT(DISTINCT t.txid)::bigint                  AS count,
-                   COALESCE(SUM(ti.total_input_amount), 0)::bigint AS amount
-            FROM transactions t
-                     JOIN
-                 session_times st ON t.session_index = st.session_index AND t.federation_id = st.federation_id
-                     JOIN
-                 (SELECT federation_id,
-                         txid,
-                         SUM(amount_msat) AS total_input_amount
-                  FROM transaction_inputs
-                  WHERE federation_id = $1
-                  GROUP BY txid, federation_id) ti ON t.txid = ti.txid AND t.federation_id = ti.federation_id
-            WHERE t.federation_id = $1
-            GROUP BY date
-            ORDER BY date;
+            SELECT day          AS date,
+                   tx_count     AS count,
+                   volume_msat  AS amount
+            FROM federation_tx_daily
+            WHERE federation_id = $1
+            ORDER BY day;
         ";
 
         // Check federation exists
