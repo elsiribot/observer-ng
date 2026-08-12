@@ -108,3 +108,130 @@ export const api = {
   getUserTransaction: (federationId: string, userTxKey: string) =>
     request<UserTransaction>(`/federations/${federationId}/user-transactions/${userTxKey}`),
 };
+
+// Parses one SSE frame (everything between a pair of blank-line-delimited
+// `\n\n` boundaries) into its event name (default "message" per the SSE
+// spec) and data payload. Multiple `data:` lines are concatenated with `\n`,
+// also per spec. Exported standalone so tests can exercise frame parsing
+// without a real streamed response.
+export function parseSseFrame(frame: string): { event: string; data: string } {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const rawLine of frame.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (line.startsWith('event:')) {
+      event = line.slice('event:'.length).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).replace(/^ /, ''));
+    }
+  }
+  return { event, data: dataLines.join('\n') };
+}
+
+const LIVE_RECONNECT_DELAY_MS = 1000;
+
+export interface LiveHandlers {
+  onItem: (item: SessionItem) => void;
+  onRollover?: (sessionIndex: number) => void;
+  onError?: (err: unknown) => void;
+}
+
+// Subscribes to a federation's live consensus session via SSE, using
+// `authedFetch` (not `EventSource`) so the bearer token can travel as an
+// `Authorization` header, per the transport decision in the Task 6 brief.
+// Runs an internal reconnect loop: on stream end or error, waits briefly and
+// reconnects, unless `signal` is aborted. Fire-and-forget (void return); the
+// caller controls the subscription lifetime entirely via `signal`.
+export function subscribeLive(
+  federationId: string,
+  handlers: LiveHandlers,
+  signal: AbortSignal
+): void {
+  void runLiveLoop(federationId, handlers, signal);
+}
+
+async function runLiveLoop(
+  federationId: string,
+  handlers: LiveHandlers,
+  signal: AbortSignal
+): Promise<void> {
+  while (!signal.aborted) {
+    try {
+      const res = await authedFetch(`/federations/${federationId}/live`, {
+        signal,
+        headers: { Accept: 'text/event-stream' },
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`Live stream request failed with status ${res.status}`);
+      }
+      await readLiveStream(res.body, handlers);
+      // Stream ended cleanly (server closed it) without abort: fall through
+      // to the reconnect delay below and try again.
+    } catch (err) {
+      if (signal.aborted) {
+        return;
+      }
+      handlers.onError?.(err);
+    }
+    if (signal.aborted) {
+      return;
+    }
+    await delay(LIVE_RECONNECT_DELAY_MS, signal);
+  }
+}
+
+async function readLiveStream(body: ReadableStream<Uint8Array>, handlers: LiveHandlers): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      dispatchSseFrame(frame, handlers);
+      boundary = buffer.indexOf('\n\n');
+    }
+  }
+}
+
+function dispatchSseFrame(frame: string, handlers: LiveHandlers): void {
+  // The backend enables axum's SSE `KeepAlive`, which periodically sends a
+  // comment-only frame (a bare `:...` line, no `event:`/`data:` field) to
+  // keep the connection alive through proxies. Such a frame carries no
+  // event/data field at all, so skip it here rather than falling through to
+  // `JSON.parse('')`, which would throw.
+  const hasField = frame
+    .split('\n')
+    .some((rawLine) => /^(event|data):/.test(rawLine.replace(/\r$/, '')));
+  if (!hasField) {
+    return;
+  }
+  const { event, data } = parseSseFrame(frame);
+  if (event === 'message') {
+    if (!data) {
+      return;
+    }
+    handlers.onItem(JSON.parse(data) as SessionItem);
+  } else if (event === 'rollover') {
+    handlers.onRollover?.(Number(data));
+  }
+}
+
+// Waits `ms` milliseconds, resolving early (without throwing) if `signal` is
+// aborted first, so the live-loop's reconnect backoff doesn't keep a pending
+// timer alive past unmount.
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
