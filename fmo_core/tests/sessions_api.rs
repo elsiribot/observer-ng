@@ -65,7 +65,7 @@ async fn session_page_and_items() {
     )
     .await
     .unwrap();
-    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+    fmo_core::db::session_times::recompute_full(&conn)
         .await
         .unwrap();
 

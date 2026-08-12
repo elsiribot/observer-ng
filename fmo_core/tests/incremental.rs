@@ -22,6 +22,7 @@ use fedimint_dummy_common::{DummyConsensusItem, DummyInput, DummyOutput};
 use fmo_core::dispatch::dispatch_items_to_module;
 use fmo_core::ingest::ingest_items;
 use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
+use fmo_core::observer::FederationObserver;
 use fmo_core::registry::ModuleRegistry;
 use fmo_core::services::CoreServices;
 use serde_json::json;
@@ -870,4 +871,137 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
             "{schema}.seen differs between whole-list and split runs"
         );
     }
+}
+
+/// `refresh_session_times` must freeze the finalized prefix (below the module
+/// frontier) while recomputing the still-processing tail: a late vote for a
+/// frozen session is ignored, a new vote for a tail session is picked up, and a
+/// vote-less tail session forward-fills from the frozen prefix.
+#[tokio::test]
+async fn session_times_freezes_finalized_prefix() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    for idx in 0..5i32 {
+        conn.execute(
+            "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, $2, ''::bytea)",
+            &[&fed, &idx],
+        )
+        .await
+        .unwrap();
+    }
+    // Direct votes on sessions 0, 2, 4 only; 1 and 3 are forward-filled.
+    for (idx, ts) in [
+        (0i32, "2024-01-01 00:00:00"),
+        (2, "2024-01-03 00:00:00"),
+        (4, "2024-01-05 00:00:00"),
+    ] {
+        conn.execute(
+            &format!(
+                "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+                 VALUES ($1, $2, 'dummy', 0, '{ts}')"
+            ),
+            &[&fed, &idx],
+        )
+        .await
+        .unwrap();
+    }
+
+    let registry = ModuleRegistry::new(vec![Arc::new(TestModule) as Arc<dyn ObserverModule>]);
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        registry,
+    )
+    .await
+    .unwrap();
+
+    async fn ts_text(pool: &deadpool_postgres::Pool, fed: &[u8], idx: i32) -> Option<String> {
+        pool.get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT estimated_session_timestamp::text FROM session_times
+                 WHERE federation_id = $1 AND session_index = $2",
+                &[&fed, &idx],
+            )
+            .await
+            .unwrap()
+            .get::<_, Option<String>>(0)
+    }
+
+    // Cycle 1: frontier 0 (module hasn't processed) -> recompute everything,
+    // cursor stays 0. Forward-fill: 1<-0, 3<-2.
+    observer.refresh_session_times().await.unwrap();
+    assert_eq!(
+        ts_text(&pool, &fed, 1).await.as_deref(),
+        Some("2024-01-01 00:00:00")
+    );
+    assert_eq!(
+        ts_text(&pool, &fed, 3).await.as_deref(),
+        Some("2024-01-03 00:00:00")
+    );
+    assert_eq!(
+        ts_text(&pool, &fed, 4).await.as_deref(),
+        Some("2024-01-05 00:00:00")
+    );
+
+    // Module processes through session 2 -> frontier 3.
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('dummy', $1, 3)
+         ON CONFLICT (module_kind, federation_id) DO UPDATE SET next_session_index = 3",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+
+    // Cycle 2: stored cursor 0, frontier 3 -> start 0 (recompute all), then the
+    // cursor advances to 3, freezing sessions [0, 3).
+    observer.refresh_session_times().await.unwrap();
+
+    // Late votes: session 1 is now frozen (< frontier); session 4 is in the tail.
+    for (idx, ts) in [(1i32, "2024-06-06 00:00:00"), (4, "2024-07-07 00:00:00")] {
+        conn.execute(
+            &format!(
+                "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+                 VALUES ($1, $2, 'dummy', 1, '{ts}')"
+            ),
+            &[&fed, &idx],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Cycle 3: stored cursor 3, frontier 3 -> recompute only [3, 4].
+    observer.refresh_session_times().await.unwrap();
+
+    // Frozen: session 1 keeps its old forward-filled value, ignoring the late vote.
+    assert_eq!(
+        ts_text(&pool, &fed, 1).await.as_deref(),
+        Some("2024-01-01 00:00:00"),
+        "frozen session must ignore a late vote"
+    );
+    // Tail vote-less session 3 forward-fills from the frozen prefix (session 2).
+    assert_eq!(
+        ts_text(&pool, &fed, 3).await.as_deref(),
+        Some("2024-01-03 00:00:00"),
+        "tail session forward-fills from the frozen seed"
+    );
+    // Tail session 4 picks up the new (larger) vote.
+    assert_eq!(
+        ts_text(&pool, &fed, 4).await.as_deref(),
+        Some("2024-07-07 00:00:00"),
+        "tail session must pick up a new vote"
+    );
 }

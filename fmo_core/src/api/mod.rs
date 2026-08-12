@@ -120,9 +120,9 @@ async fn publish_federation_event(
 }
 
 impl FederationObserver {
-    /// Periodically refreshes the core `session_times` materialized view and
-    /// every materialized view registered by a module. Interval configurable
-    /// via `FO_REFRESH_INTERVAL_SECS` (default 60).
+    /// Periodically refreshes the core `session_times` table (incrementally)
+    /// and every materialized view registered by a module. Interval
+    /// configurable via `FO_REFRESH_INTERVAL_SECS` (default 60).
     pub(crate) async fn refresh_views(self) {
         let interval_secs = std::env::var("FO_REFRESH_INTERVAL_SECS")
             .ok()
@@ -156,9 +156,9 @@ impl FederationObserver {
         // `user_tx_daily` rollup must be refreshed AFTER the heal fills in the
         // timestamps/amounts the async enrichment above produced. So the order
         // is fixed: session_times -> heal_gold -> user_tx_daily (+ module
-        // matviews).
-        conn.batch_execute("REFRESH MATERIALIZED VIEW CONCURRENTLY session_times")
-            .await?;
+        // matviews). `session_times` is now an incrementally maintained table
+        // (see db::session_times), not a matview.
+        self.refresh_session_times().await?;
 
         // Repair gold rows the processor folded before their timestamp /
         // inferred amount existed (see gold::heal_gold).

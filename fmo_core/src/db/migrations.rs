@@ -34,6 +34,9 @@ const CORE_MIGRATIONS: &[Migration] = &[
     Migration {
         sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/core/v5.sql")),
     },
+    Migration {
+        sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/core/v6.sql")),
+    },
 ];
 
 /// Applies pending core schema migrations, tracked in `core_schema_version`.

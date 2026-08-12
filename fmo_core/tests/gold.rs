@@ -695,7 +695,7 @@ async fn heal_gold_backfills_timestamp_and_populates_daily() {
     )
     .await
     .unwrap();
-    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+    fmo_core::db::session_times::recompute_full(&conn)
         .await
         .unwrap();
     fmo_core::gold::heal_gold(&conn).await.unwrap();
@@ -1644,10 +1644,7 @@ async fn user_tx_daily_rolls_up_after_refresh() {
         )
         .await
         .unwrap();
-    pool.get()
-        .await
-        .unwrap()
-        .batch_execute("REFRESH MATERIALIZED VIEW session_times")
+    fmo_core::db::session_times::recompute_full(&pool.get().await.unwrap())
         .await
         .unwrap();
 

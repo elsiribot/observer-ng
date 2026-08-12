@@ -87,7 +87,7 @@ async fn histogram_is_isolated_per_federation() {
         .await
         .unwrap();
     }
-    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+    fmo_core::db::session_times::recompute_full(&conn)
         .await
         .unwrap();
 

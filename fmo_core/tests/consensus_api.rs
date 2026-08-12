@@ -85,7 +85,7 @@ async fn consensus_stream_filters_and_paging() {
     )
     .await
     .unwrap();
-    conn.batch_execute("REFRESH MATERIALIZED VIEW session_times")
+    fmo_core::db::session_times::recompute_full(&conn)
         .await
         .unwrap();
     drop(conn);

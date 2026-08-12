@@ -154,11 +154,8 @@ async fn e2e_pipeline_and_replay_idempotency() {
     .unwrap();
     assert_eq!(processed, 5);
 
-    // matview refresh works on the populated schema
-    pool.get()
-        .await
-        .unwrap()
-        .batch_execute("REFRESH MATERIALIZED VIEW CONCURRENTLY session_times")
+    // session_times maintenance works on the populated schema
+    fmo_core::db::session_times::recompute_full(&pool.get().await.unwrap())
         .await
         .unwrap();
 
