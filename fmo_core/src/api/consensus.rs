@@ -86,8 +86,11 @@ mod tests {
     }
 }
 
+/// `pub(super)` (rather than private) so `api::live`'s live-session delta
+/// query (`LIVE_QUERY`) can reuse this row shape + its `SessionItem`
+/// conversion instead of re-assembling the enrichment.
 #[derive(FromRow)]
-struct ConsensusItemRow {
+pub(super) struct ConsensusItemRow {
     session_index: i64,
     item_index: i64,
     item_type: String,

@@ -66,6 +66,7 @@ pub fn get_federations_routes() -> Router<AppState> {
             "/:federation_id/consensus",
             get(super::consensus::consensus_stream),
         )
+        .route("/:federation_id/live", get(super::live::federation_live))
         .route("/:federation_id/backfill", post(backfill_federation))
 }
 

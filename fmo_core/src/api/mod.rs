@@ -1,6 +1,7 @@
 pub mod config;
 pub mod consensus;
 pub mod federations;
+pub mod live;
 pub mod sessions;
 mod sql_fragments;
 pub mod transactions;

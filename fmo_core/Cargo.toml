@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.81"
+async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.7.5", features = ["json"] }
 axum-auth = "0.7.0"
