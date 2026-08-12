@@ -220,23 +220,42 @@ impl FederationObserver {
     pub async fn list_federation_summaries(&self) -> anyhow::Result<Vec<FederationSummary>> {
         let federations = self.list_federations().await?;
 
-        join_all(
-            federations
-                .into_iter()
-                .map(|federation| self.federation_summary(federation.federation_id)),
-        )
+        // Fetch the fleet-wide guardian health ONCE and share it across every
+        // per-federation summary, rather than recomputing it per federation.
+        let health = self.get_guardian_health_summary().await?;
+
+        join_all(federations.into_iter().map(|federation| {
+            let health = &health;
+            async move {
+                self.federation_summary_with_health(federation.federation_id, health)
+                    .await
+            }
+        }))
         .await
         .into_iter()
         .collect()
+    }
+
+    pub async fn federation_summary(
+        &self,
+        federation_id: FederationId,
+    ) -> anyhow::Result<FederationSummary> {
+        let health = self.get_guardian_health_summary().await?;
+        self.federation_summary_with_health(federation_id, &health)
+            .await
     }
 
     /// Summary for a single federation: name, health, assets, recent
     /// activity, invite code and nostr rating. Used both by
     /// `list_federation_summaries` (fleet overview) and the single-federation
     /// `/federations/:federation_id/summary` endpoint.
-    pub async fn federation_summary(
+    /// Builds one federation's summary using an already-fetched fleet health
+    /// map, so callers folding over many federations pay the (fleet-wide)
+    /// guardian-health query once instead of once per federation.
+    async fn federation_summary_with_health(
         &self,
         federation_id: FederationId,
+        health_summary: &std::collections::BTreeMap<FederationId, FederationHealth>,
     ) -> anyhow::Result<FederationSummary> {
         let federation = self
             .get_federation(federation_id)
@@ -259,9 +278,7 @@ impl FederationObserver {
                     .cloned()
             });
 
-        let health = self
-            .get_guardian_health_summary()
-            .await?
+        let health = health_summary
             .get(&federation.federation_id)
             .copied()
             .unwrap_or(FederationHealth::Offline);
