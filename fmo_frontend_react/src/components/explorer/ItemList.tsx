@@ -95,7 +95,7 @@ export function ItemList({
                 >
                   {item.session_index}.{item.item_index}
                 </span>
-                <div className="shrink-0 w-24 sm:w-36">{itemLabel(item)}</div>
+                <div className="shrink-0 w-28 sm:w-40">{itemLabel(item)}</div>
                 <div className="flex-1 min-w-0">{renderItem(item)}</div>
               </div>
             </div>
