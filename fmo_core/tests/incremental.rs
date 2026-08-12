@@ -243,6 +243,80 @@ async fn process_pending_skips_open_session_until_data_is_set() {
     assert_eq!(seen, 3, "1 session x (input, output, ci) now processed");
 }
 
+/// Regression test for the C1 fetcher-restart bug: `run_fetcher`'s
+/// `next_session` computation must exclude the open (`data = NULL`) session
+/// when resuming, or a restart while a session is still live permanently
+/// skips it (it never gets finalized, `process_pending` and gold then skip
+/// it too). Mirrors the exact query `run_fetcher` runs in `fetch.rs`, rather
+/// than exercising `run_fetcher` itself (which isn't practical to drive in a
+/// unit-style DB test since it loops against a live federation API).
+#[tokio::test]
+async fn fetcher_resume_skips_open_session_regression() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // Sessions 0..=2 are complete (signed, `data` non-NULL). Session 3 is
+    // still open/live (`data = NULL`), exactly as the live path leaves it
+    // while it's being ingested item-by-item.
+    let conn = pool.get().await.unwrap();
+    for session_index in 0..=2i32 {
+        conn.execute(
+            "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, $2, ''::bytea)",
+            &[&fed, &session_index],
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, 3, NULL)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    // The fix: filtering on `data IS NOT NULL` must resume on the still-open
+    // session 3 (`next_session` would become `3`), not skip past it.
+    let conn = pool.get().await.unwrap();
+    let max_complete = fmo_core::query::query_value::<Option<i32>>(
+        &conn,
+        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_complete,
+        Some(2),
+        "resume point must be the last COMPLETE session, not the open one"
+    );
+
+    // Documents the bug the filter prevents: without it, the open session's
+    // NULL-data row is still counted by MAX(session_index), so a resuming
+    // fetcher would wrongly compute `next_session = 4` and permanently skip
+    // session 3.
+    let max_including_open = fmo_core::query::query_value::<Option<i32>>(
+        &conn,
+        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        max_including_open,
+        Some(3),
+        "unfiltered query wrongly includes the open session -- this is the bug the filter fixes"
+    );
+}
+
 /// A federation config with two dummy-backed module instances under
 /// different kinds ("dummy" at instance 0, "dummy2" at instance 1), so a
 /// fixture can contain consensus items of two distinct kinds. `url`

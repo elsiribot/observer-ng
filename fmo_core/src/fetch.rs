@@ -49,7 +49,7 @@ pub async fn run_fetcher(
     info!("Starting session fetcher for {federation_id}");
     let mut next_session = query_value::<Option<i32>>(
         &pool.get().await?,
-        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1",
+        "SELECT MAX(session_index) FROM sessions WHERE federation_id = $1 AND data IS NOT NULL",
         &[&federation_id.consensus_encode_to_vec()],
     )
     .await?

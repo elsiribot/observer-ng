@@ -170,8 +170,27 @@ pub(super) async fn federation_live(
             }
             let wm = rx.borrow_and_update().clone();
 
+            // Clamp the lower bound to the start of the watermark's current
+            // session. `cursor` can be stale/behind `wm.session_index` --
+            // e.g. a fresh connection's watch starts at
+            // `Watermark::default()` (session 0) and only ticks on the
+            // first *live* poll, never during `catch_up`, so after a
+            // process restart the first tick can jump straight from
+            // session 0 to whatever session is live now. Reading from a
+            // stale `cursor` in that case would span the entire gap as an
+            // ascending full-history scan instead of tailing just the live
+            // session. Jumping to `(wm.session_index, -1)` preserves
+            // within-session incremental delivery (the common case, where
+            // `cursor.0 == wm.session_index` and we keep the fine cursor)
+            // while preventing a cross-session historical replay.
+            let lower = if cursor.0 < wm.session_index {
+                (wm.session_index, -1i64)
+            } else {
+                cursor
+            };
+
             match observer
-                .federation_live_items(federation_id, Some(cursor), (wm.session_index, wm.item_index))
+                .federation_live_items(federation_id, Some(lower), (wm.session_index, wm.item_index))
                 .await
             {
                 Ok(items) => {
