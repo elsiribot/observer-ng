@@ -7,7 +7,7 @@ import { Alert } from '../components/Alert';
 import { Badge, type BadgeLevel } from '../components/Badge';
 import { Copyable } from '../components/Copyable';
 import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
-import { asBitcoin, formatNumber, formatTimestamp } from '../utils/format';
+import { asSats, formatNumber, formatTimestamp } from '../utils/format';
 
 // Badge levels for a member tx's role in a user transaction's lifecycle
 // (see `fmo_core/src/gold.rs`). Unknown/future roles fall back to 'info'.
@@ -89,16 +89,16 @@ export function UserTransaction() {
         </span>
       </div>
       <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mb-6 sm:mb-8 break-words">
-        {userTx.amount_msat !== null ? asBitcoin(userTx.amount_msat) : 'unknown amount'}
+        {userTx.amount_msat !== null ? asSats(userTx.amount_msat) : 'unknown amount'}
       </h1>
 
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6 mb-6 sm:mb-8 grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 text-sm">
         <SummaryField label="Fedimint Fee">
-          {userTx.fedimint_fee_msat !== null ? asBitcoin(userTx.fedimint_fee_msat) : 'unknown'}
+          {userTx.fedimint_fee_msat !== null ? asSats(userTx.fedimint_fee_msat) : 'unknown'}
         </SummaryField>
         <SummaryField label="Gateway Fee (estimated)">
           {userTx.gateway_fee_estimate_msat !== null
-            ? asBitcoin(userTx.gateway_fee_estimate_msat)
+            ? asSats(userTx.gateway_fee_estimate_msat)
             : 'n/a'}
         </SummaryField>
         <SummaryField label="Fedimint Transactions">

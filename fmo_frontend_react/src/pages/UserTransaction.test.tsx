@@ -56,8 +56,8 @@ describe('UserTransaction page', () => {
 
     expect(await screen.findByText('LN Receive')).toBeInTheDocument();
     expect(screen.getByText('in')).toBeInTheDocument();
-    expect(screen.getByText('0.000010 BTC')).toBeInTheDocument(); // amount 990_000 msat
-    expect(screen.getByText('0.000000 BTC')).toBeInTheDocument(); // fee 10_000 msat
+    expect(screen.getByText('990 sats')).toBeInTheDocument(); // amount 990_000 msat
+    expect(screen.getByText('10 sats')).toBeInTheDocument(); // fee 10_000 msat
     expect(screen.getByText('n/a')).toBeInTheDocument(); // gateway fee estimate
     expect(screen.getByText('3')).toBeInTheDocument(); // num_fedimint_txs
 

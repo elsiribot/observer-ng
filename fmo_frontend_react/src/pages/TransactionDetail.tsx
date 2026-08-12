@@ -5,7 +5,7 @@ import type { TxDetail, TxItemPart, UserTransaction } from '../types/api';
 import { Alert } from '../components/Alert';
 import { Badge } from '../components/Badge';
 import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
-import { asBitcoin, formatNumber } from '../utils/format';
+import { asSats, formatNumber } from '../utils/format';
 
 // Transaction-detail page: the structured inputs/outputs of one fedimint
 // transaction, drilled into from a session's item list or the consensus
@@ -103,7 +103,7 @@ export function TransactionDetail() {
                   {classificationBadge(userTx.kind).label}
                 </Badge>
                 {userTx.amount_msat !== null && (
-                  <span className="font-semibold">{asBitcoin(userTx.amount_msat)}</span>
+                  <span className="font-semibold">{asSats(userTx.amount_msat)}</span>
                 )}
               </>
             ) : (
@@ -149,7 +149,7 @@ function TxPartRow({ part }: { part: TxItemPart }) {
         <Badge level="info">{part.kind}</Badge>
         {part.amount_msat !== null && (
           <span className="text-gray-900 dark:text-white font-mono">
-            {asBitcoin(part.amount_msat)}
+            {asSats(part.amount_msat)}
           </span>
         )}
       </div>

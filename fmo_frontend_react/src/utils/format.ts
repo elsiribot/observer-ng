@@ -10,6 +10,14 @@ export function toBitcoin(msats: number, decimals: number = 6): string {
   return btc.toFixed(decimals);
 }
 
+// Convert millisatoshis to satoshis for display (whole sats, thousand-separated).
+// Sub-satoshi remainders (msat) are dropped — amounts on-chain/in-Fedimint are
+// effectively sat-granular for display purposes.
+export function asSats(msats: number): string {
+  const sats = Math.round(msats / 1000);
+  return `${sats.toLocaleString('en-US')} sats`;
+}
+
 // Format numbers with thousand separators
 export function formatNumber(num: number): string {
   return num.toLocaleString('en-US');
