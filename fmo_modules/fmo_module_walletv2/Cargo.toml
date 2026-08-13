@@ -9,10 +9,18 @@ async-trait = "0.1"
 axum = { version = "0.7.5", features = ["json"] }
 bitcoin = "0.32.5"
 chrono = { version = "0.4.38", features = ["serde"] }
+esplora-client = { version = "0.10.0", default-features = false, features = [
+    "async-https-rustls",
+] }
+fedimint-api-client = { workspace = true }
 fedimint-core = { workspace = true }
 fedimint-walletv2-common = { workspace = true }
+fmo_api_types = { path = "../../fmo_api_types" }
 fmo_core = { path = "../../fmo_core" }
+futures = "0.3.30"
+postgres-from-row = "0.5.2"
 serde_json = "1.0.115"
+tokio = { version = "1.37.0", features = ["time"] }
 tracing = "0.1.40"
 
 [dev-dependencies]

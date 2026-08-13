@@ -407,33 +407,111 @@ impl FederationObserver {
             .collect())
     }
 
-    /// On-chain assets held by the federation: peg-in deposits (wallet inputs)
-    /// minus peg-out withdrawals (wallet outputs). Covers BOTH the v1 `wallet`
-    /// and v2 `walletv2` modules — walletv2-only federations would otherwise
-    /// net to 0. The v2 amounts follow the same input=deposit(+)/output=
-    /// withdrawal(-) convention; note walletv2 input amounts are balance-
-    /// inferred (fee-approximate) rather than exact consensus values (walletv2
-    /// tracks no on-chain UTXO set), so this is a close estimate for those.
+    /// On-chain assets held by the federation, summing the v1 `wallet` and v2
+    /// `walletv2` modules (walletv2-only federations would otherwise net to 0).
+    ///
+    /// - v1 `wallet`: peg-in deposits (inputs) minus peg-out withdrawals
+    ///   (outputs), the exact consensus values.
+    /// - v2 `walletv2`: the EXACT current on-chain balance, read as the value
+    ///   of the federation's single consolidated UTXO (the latest resolved
+    ///   `fmo_walletv2.wallet_utxos` row, derived from the wallet-tx txids
+    ///   announced in consensus and looked up on an explorer). If no such row
+    ///   is resolved yet (e.g. the version-bump replay + explorer backfill
+    ///   hasn't caught up), we fall back to the old input(+)/output(-) netting,
+    ///   which is fee-approximate (provably low by the mandatory per-item
+    ///   walletv2 fees) but never worse than before this change.
     pub async fn get_federation_assets(
         &self,
         federation_id: FederationId,
     ) -> anyhow::Result<Amount> {
-        let total_assets_msat = query_value::<i64>(
-            &self.connection().await?,
+        let fed = federation_id.consensus_encode_to_vec();
+        let conn = self.connection().await?;
+
+        #[derive(Debug, FromRow)]
+        struct AssetNettingRow {
+            wallet_net_msat: i64,
+            walletv2_net_msat: i64,
+        }
+
+        // Baseline: per-module netting of exact input/output amounts. Always
+        // available (reads core structural tables).
+        let netting = query_one::<AssetNettingRow>(
+            &conn,
             "
         SELECT
-            CAST((SELECT COALESCE(SUM(amount_msat), 0)
-             FROM transaction_inputs
-             WHERE kind IN ('wallet', 'walletv2') AND federation_id = $1) -
-            (SELECT COALESCE(SUM(amount_msat), 0)
-             FROM transaction_outputs
-             WHERE kind IN ('wallet', 'walletv2') AND federation_id = $1) AS BIGINT) AS net_amount_msat
+            CAST((SELECT COALESCE(SUM(amount_msat), 0) FROM transaction_inputs
+                  WHERE kind = 'wallet' AND federation_id = $1) -
+                 (SELECT COALESCE(SUM(amount_msat), 0) FROM transaction_outputs
+                  WHERE kind = 'wallet' AND federation_id = $1) AS BIGINT) AS wallet_net_msat,
+            CAST((SELECT COALESCE(SUM(amount_msat), 0) FROM transaction_inputs
+                  WHERE kind = 'walletv2' AND federation_id = $1) -
+                 (SELECT COALESCE(SUM(amount_msat), 0) FROM transaction_outputs
+                  WHERE kind = 'walletv2' AND federation_id = $1) AS BIGINT) AS walletv2_net_msat
         ",
-            &[&federation_id.consensus_encode_to_vec()],
+            &[&fed],
         )
         .await?;
 
-        Ok(Amount::from_msats(total_assets_msat as u64))
+        // Prefer the exact walletv2 UTXO value when available. Guard the
+        // cross-schema reference so core stays decoupled from whether the
+        // walletv2 module (and its schema) is registered at all — Postgres
+        // validates all table references at parse time, so we can't reference
+        // `fmo_walletv2.wallet_utxos` in a query unless it exists.
+        //
+        // "Latest resolved UTXO" ranks each txid by its FIRST appearance (min
+        // session_index, then min item_index within that session), not any
+        // appearance: the walletv2 server re-emits a `Signatures` CI for every
+        // still-unfinalized tx, once per peer, each session until it finalizes,
+        // and within a session those items are ordered by txid (BTreeMap key
+        // order), not creation order. So an older-but-still-pending tx
+        // re-announced in a later session can carry a higher `(session, item)`
+        // than the genuinely newer tx; first-appearance ranking avoids
+        // returning its stale value. (Two distinct txids first announced in the
+        // same session remain ambiguous, but that is transient until one
+        // finalizes.) This mirrors `LATEST_RESOLVED_UTXO_FROM` in the walletv2
+        // module.
+        let walletv2_exact_msat = if self.walletv2_utxos_table_exists(&conn).await? {
+            query_value::<Option<i64>>(
+                &conn,
+                "SELECT (
+                    SELECT utxo_value_msat
+                    FROM (
+                        SELECT DISTINCT ON (txid)
+                               txid, session_index, item_index, utxo_value_msat
+                        FROM fmo_walletv2.wallet_utxos
+                        WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                        ORDER BY txid, session_index ASC, item_index ASC
+                    ) firsts
+                    ORDER BY session_index DESC, item_index DESC
+                    LIMIT 1
+                )",
+                &[&fed],
+            )
+            .await?
+        } else {
+            None
+        };
+
+        let walletv2_msat = walletv2_exact_msat.unwrap_or(netting.walletv2_net_msat);
+        let total_msat = (netting.wallet_net_msat + walletv2_msat).max(0);
+
+        Ok(Amount::from_msats(total_msat as u64))
+    }
+
+    /// Whether the `fmo_walletv2.wallet_utxos` table exists (i.e. the walletv2
+    /// module is registered and its schema migrated). Uses `to_regclass`,
+    /// which returns NULL for an absent relation instead of erroring.
+    async fn walletv2_utxos_table_exists(
+        &self,
+        conn: &deadpool_postgres::Object,
+    ) -> anyhow::Result<bool> {
+        Ok(query_value::<Option<String>>(
+            conn,
+            "SELECT to_regclass('fmo_walletv2.wallet_utxos')::text",
+            &[],
+        )
+        .await?
+        .is_some())
     }
 
     /// Returns the cached totals (refreshed on the matview refresh cycle,

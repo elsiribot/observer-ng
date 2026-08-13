@@ -12,6 +12,25 @@ use fmo_module_walletv2::WalletV2Observer;
 
 const RECEIVE_ADDRESS: &str = "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw";
 
+/// Tests share one database (`reset_db` drops/recreates the public schema), so
+/// serialize the DB-touching tests within this binary.
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Resets the public (core) schema and drops any leftover `fmo_walletv2`
+/// schema. `reset_db` only touches `public`, but a prior test binary (e.g.
+/// fmo_core's assets tests) may have left an `fmo_walletv2` schema behind;
+/// without dropping it, `setup_module_schema` would re-run the module
+/// migrations over the existing tables and collide.
+async fn reset_all(pool: &deadpool_postgres::Pool) {
+    reset_db(pool).await;
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("DROP SCHEMA IF EXISTS fmo_walletv2 CASCADE")
+        .await
+        .unwrap();
+}
+
 fn test_pk() -> fedimint_core::secp256k1::PublicKey {
     fedimint_core::secp256k1::PublicKey::from_str(
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -21,11 +40,12 @@ fn test_pk() -> fedimint_core::secp256k1::PublicKey {
 
 #[tokio::test]
 async fn walletv2_processes_receives_sends_and_block_count_votes() {
+    let _guard = DB_LOCK.lock().await;
     let Some(pool) = test_pool() else {
         eprintln!("skipping: FMO_TEST_DATABASE unset");
         return;
     };
-    reset_db(&pool).await;
+    reset_all(&pool).await;
     let (config, federation_id) = minimal_config();
     insert_federation(&pool, &config, federation_id).await;
     let services = test_services(&pool);
@@ -185,4 +205,166 @@ async fn walletv2_processes_receives_sends_and_block_count_votes() {
         .unwrap()
         .get(0);
     assert_eq!(time_votes, 1);
+}
+
+/// A `Signatures` consensus item records the on-chain wallet-tx txid into
+/// `wallet_utxos` with a NULL (not-yet-resolved) value. The txid is stored in
+/// internal byte order so it round-trips via `Txid::from_slice`.
+#[tokio::test]
+async fn walletv2_records_signatures_txid_for_utxo_resolution() {
+    use bitcoin::hashes::Hash;
+
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_all(&pool).await;
+    let (config, federation_id) = minimal_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let services = test_services(&pool);
+
+    let module = WalletV2Observer;
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "walletv2",
+        module.version(),
+        module.migrations(),
+    )
+    .await
+    .unwrap();
+
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // The on-chain txid the federation's signatures commit to.
+    let onchain_txid = bitcoin::Txid::from_byte_array([0xab; 32]);
+
+    let mut conn = pool.get().await.unwrap();
+    let dbtx = conn.transaction().await.unwrap();
+    dbtx.batch_execute("SET LOCAL search_path TO fmo_walletv2, public")
+        .await
+        .unwrap();
+    let mut ctx = ProcessCtx {
+        dbtx: &dbtx,
+        federation_id,
+        config,
+        services,
+    };
+
+    // Two peers announce the same transition (same txid) at different item
+    // indexes; both are recorded, both unresolved.
+    for (item_index, peer) in [(5u64, 1u16), (6, 2)] {
+        let ci = WalletConsensusItem::Signatures(onchain_txid, vec![]).into_dyn(0);
+        let ci_meta = CiMeta {
+            federation_id,
+            session_index: 3,
+            item_index,
+            peer: PeerId::from(peer),
+            peer_count: 4,
+        };
+        let details = module.process_ci(&mut ctx, &ci, &ci_meta).await.unwrap();
+        assert!(details.is_some());
+    }
+
+    dbtx.commit().await.unwrap();
+
+    let conn = pool.get().await.unwrap();
+    let rows = conn
+        .query(
+            "SELECT session_index, item_index, txid, utxo_value_msat, resolved_at
+             FROM fmo_walletv2.wallet_utxos WHERE federation_id = $1
+             ORDER BY item_index",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let txid_bytes: Vec<u8> = row.get("txid");
+        assert_eq!(
+            bitcoin::Txid::from_slice(&txid_bytes).unwrap(),
+            onchain_txid
+        );
+        assert_eq!(row.get::<_, i32>("session_index"), 3);
+        assert!(row.get::<_, Option<i64>>("utxo_value_msat").is_none());
+        assert!(row
+            .get::<_, Option<chrono::NaiveDateTime>>("resolved_at")
+            .is_none());
+    }
+    assert_eq!(rows[0].get::<_, i32>("item_index"), 5);
+    assert_eq!(rows[1].get::<_, i32>("item_index"), 6);
+}
+
+/// Validates, against the real `fmo_walletv2.wallet_utxos` schema, that the
+/// "latest resolved UTXO" query ranks txids by FIRST appearance: an older txid
+/// re-announced at a later (session, item) must not win over a newer txid whose
+/// first appearance is more recent. Mirrors `LATEST_RESOLVED_UTXO_FROM` in the
+/// module (kept in sync manually since it is private).
+#[tokio::test]
+async fn walletv2_latest_utxo_ranks_by_first_appearance() {
+    use bitcoin::hashes::Hash;
+
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_all(&pool).await;
+    let (config, federation_id) = minimal_config();
+    insert_federation(&pool, &config, federation_id).await;
+
+    let module = WalletV2Observer;
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "walletv2",
+        module.version(),
+        module.migrations(),
+    )
+    .await
+    .unwrap();
+
+    let fed = federation_id.consensus_encode_to_vec();
+    let old_txid = bitcoin::Txid::from_byte_array([0xaa; 32]);
+    let new_txid = bitcoin::Txid::from_byte_array([0xbb; 32]);
+
+    let conn = pool.get().await.unwrap();
+    // OLD first appears at session 2 (50M), NEW at session 3 (80M), then OLD is
+    // RE-ANNOUNCED at session 4 (later than NEW's first appearance).
+    conn.execute(
+        "INSERT INTO fmo_walletv2.wallet_utxos
+             (federation_id, session_index, item_index, txid, utxo_value_msat, address, resolved_at)
+         VALUES
+             ($1, 2, 0, $2, 50000000, 'bc1old', NOW()::timestamp),
+             ($1, 3, 0, $3, 80000000, 'bc1new', NOW()::timestamp),
+             ($1, 4, 0, $2, 50000000, 'bc1old', NOW()::timestamp)",
+        &[
+            &fed,
+            &old_txid.to_byte_array().to_vec(),
+            &new_txid.to_byte_array().to_vec(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let row = conn
+        .query_one(
+            "SELECT txid, utxo_value_msat, address
+             FROM (
+                 SELECT DISTINCT ON (txid)
+                        txid, session_index, item_index, utxo_value_msat, address
+                 FROM fmo_walletv2.wallet_utxos
+                 WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                 ORDER BY txid, session_index ASC, item_index ASC
+             ) firsts
+             ORDER BY session_index DESC, item_index DESC
+             LIMIT 1",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    let txid_bytes: Vec<u8> = row.get("txid");
+    assert_eq!(bitcoin::Txid::from_slice(&txid_bytes).unwrap(), new_txid);
+    assert_eq!(row.get::<_, i64>("utxo_value_msat"), 80_000_000);
+    assert_eq!(row.get::<_, String>("address"), "bc1new");
 }
