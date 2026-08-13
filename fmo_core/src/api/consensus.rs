@@ -301,11 +301,7 @@ impl FederationObserver {
 /// the 127M-row `consensus_items` table) build does not block concurrent
 /// writers — it is still `.await`ed by the caller before serving traffic, so
 /// it *does* delay startup for its duration; `CONCURRENTLY` only buys
-/// writer-non-blocking, not startup-non-blocking. Must run outside any
-/// transaction — each statement is issued individually on its own
-/// connection. Idempotent (`IF NOT EXISTS`, plus a drop-if-invalid guard
-/// below) and resilient: a failure (e.g. a build already in progress from a
-/// prior crashed startup) is logged and does not stop the caller.
+/// writer-non-blocking, not startup-non-blocking.
 ///
 /// Note: `transactions_by_session` (2-column, no `item_index`) already
 /// exists from the original core schema (`schema/core/v0.sql`), so the
@@ -327,23 +323,62 @@ pub async fn ensure_explorer_indexes(pool: &Pool) {
         ),
     ];
 
-    for (name, sql) in INDEXES {
+    build_indexes_concurrently(pool, INDEXES).await;
+}
+
+/// Builds the partial `WHERE amount_msat IS NULL` indexes that keep
+/// `amounts::infer_missing_amounts` off a full-table scan: without them it
+/// seq-scans the multi-million-row `transaction_inputs`/`transaction_outputs`
+/// tables every refresh cycle just to find its handful of NULL candidate rows,
+/// which also made it hold a long `transactions` read-lock (via its subquery
+/// join) that blocked deploy-time migrations. As a row's amount is filled --
+/// by inference OR by a newly-added observer module decoding it exactly -- it
+/// drops out of the partial index, which stays tiny. This changes NOTHING
+/// about which rows are candidates: every NULL row stays eligible forever, so
+/// a future module can still fill it with real data.
+///
+/// Unlike [`ensure_explorer_indexes`] this is spawned as a background task,
+/// NOT awaited before serving: a `CREATE INDEX CONCURRENTLY` waits for
+/// in-flight transactions to drain, so a slow `infer` cycle in progress could
+/// otherwise stall startup — the exact bootstrap trap this fix removes. Built
+/// in the background it lands whenever the DB allows, and `infer` is fast from
+/// then on.
+pub async fn ensure_infer_indexes(pool: &Pool) {
+    const INDEXES: &[(&str, &str)] = &[
+        (
+            "transaction_inputs_null_amount",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS transaction_inputs_null_amount \
+             ON transaction_inputs (federation_id, txid) WHERE amount_msat IS NULL",
+        ),
+        (
+            "transaction_outputs_null_amount",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS transaction_outputs_null_amount \
+             ON transaction_outputs (federation_id, txid) WHERE amount_msat IS NULL",
+        ),
+    ];
+
+    build_indexes_concurrently(pool, INDEXES).await;
+}
+
+/// Builds each `(name, sql)` index with `CREATE INDEX CONCURRENTLY` on its own
+/// connection, outside any transaction. First drops a leftover INVALID index
+/// of that name (a `CONCURRENTLY` build interrupted by a crash leaves one, and
+/// `IF NOT EXISTS` only checks the name, not validity, so it would treat the
+/// broken index as "present" forever). Idempotent and resilient: a per-index
+/// failure is logged and does not stop the rest. `name` values are hardcoded
+/// constants (not user input), so interpolating them via `format!` is safe;
+/// the `DROP` is still identifier-quoted by Postgres's `format('DROP INDEX
+/// %I', ...)`.
+async fn build_indexes_concurrently(pool: &Pool, indexes: &[(&str, &str)]) {
+    for (name, sql) in indexes {
         let conn = match pool.get().await {
             Ok(conn) => conn,
             Err(e) => {
-                warn!("Could not get a connection to build explorer index {name}: {e:?}");
+                warn!("Could not get a connection to build index {name}: {e:?}");
                 continue;
             }
         };
 
-        // A `CREATE INDEX CONCURRENTLY` interrupted mid-build (e.g. by a
-        // crashed/killed server) leaves an INVALID index of that name
-        // behind. `CREATE INDEX ... IF NOT EXISTS` only checks the name, not
-        // validity, so it would then treat the broken index as "present"
-        // forever and the explorer would silently run without it. `name` is
-        // one of the two hardcoded constants above (not user input), so
-        // interpolating it via `format!` here is safe; the actual DROP is
-        // still identifier-quoted by Postgres's `format('DROP INDEX %I', ...)`.
         let drop_if_invalid = format!(
             "DO $$ BEGIN
                IF EXISTS (
@@ -356,14 +391,14 @@ pub async fn ensure_explorer_indexes(pool: &Pool) {
              END $$"
         );
         if let Err(e) = conn.execute(drop_if_invalid.as_str(), &[]).await {
-            warn!("Could not check/drop invalid explorer index {name} (continuing): {e:?}");
+            warn!("Could not check/drop invalid index {name} (continuing): {e:?}");
         }
 
-        info!("Building explorer index {name} (CONCURRENTLY, one-time)...");
+        info!("Building index {name} (CONCURRENTLY, one-time)...");
         match conn.execute(*sql, &[]).await {
-            Ok(_) => info!("Explorer index {name} ready"),
+            Ok(_) => info!("Index {name} ready"),
             Err(e) => warn!(
-                "Could not build explorer index {name} (continuing; a concurrent build from a \
+                "Could not build index {name} (continuing; a concurrent build from a \
                  prior startup may already be in progress): {e:?}"
             ),
         }

@@ -140,6 +140,15 @@ impl FederationObserver {
         observer
             .task_group
             .spawn_cancellable("refresh views", observer.clone().refresh_views());
+        // Build the amount-inference partial indexes in the background (see
+        // consensus::ensure_infer_indexes): awaiting them could let a slow
+        // infer cycle stall startup.
+        observer
+            .task_group
+            .spawn_cancellable("build infer indexes", {
+                let pool = observer.pool.clone();
+                async move { crate::api::consensus::ensure_infer_indexes(&pool).await }
+            });
 
         Ok(observer)
     }
