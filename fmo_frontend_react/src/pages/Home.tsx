@@ -138,60 +138,60 @@ export function Home() {
         </div>
       </div>
 
-  {/* Sort controls */}
-  <div className="mb-4 flex items-center justify-end gap-2">
-        <label
-          htmlFor="federation-sort"
-          className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-400"
-        >
-          Sort by
-        </label>
-        <select
-          id="federation-sort"
-          value={sortKey}
-          onChange={(e) => handleSortKeyChange(e.target.value as SortKey)}
-          className="text-xs sm:text-sm rounded-lg border border-gray-300 bg-white p-2 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
-        >
-          {SORT_OPTIONS.map((opt) => (
-            <option key={opt.key} value={opt.key}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() =>
-            setSortDirection((dir) => (dir === 'asc' ? 'desc' : 'asc'))
-          }
-          aria-label={
-            sortDirection === 'asc' ? 'Sort ascending' : 'Sort descending'
-          }
-          title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
-          className="rounded-lg border border-gray-300 bg-white p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-        >
-          <svg
-            className={`w-3 h-3 transition-transform ${sortDirection === 'asc' ? 'rotate-180' : ''}`}
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 10 6"
-          >
-            <path
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="2"
-              d="M9 5 5 1 1 5"
-            />
-          </svg>
-        </button>
-      </div>
-
   <div className="relative overflow-x-auto bg-white shadow-md rounded-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
-    <div className="p-4 sm:p-5 text-base sm:text-lg font-semibold text-left rtl:text-right text-gray-900 bg-white dark:text-white dark:bg-gray-800">
-          Observed Federations
-          <p className="mt-1 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
-            List of all active federations this instance is collecting statistics on
-          </p>
+        <div className="p-4 sm:p-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between bg-white dark:bg-gray-800">
+          <div className="text-base sm:text-lg font-semibold text-left rtl:text-right text-gray-900 dark:text-white">
+            Observed Federations
+            <p className="mt-1 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
+              List of all active federations this instance is collecting statistics on
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 self-start">
+            <label
+              htmlFor="federation-sort"
+              className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400"
+            >
+              Sort by
+            </label>
+            <select
+              id="federation-sort"
+              value={sortKey}
+              onChange={(e) => handleSortKeyChange(e.target.value as SortKey)}
+              className="text-xs sm:text-sm rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            >
+              {SORT_OPTIONS.map((opt) => (
+                <option key={opt.key} value={opt.key}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() =>
+                setSortDirection((dir) => (dir === 'asc' ? 'desc' : 'asc'))
+              }
+              aria-label={
+                sortDirection === 'asc' ? 'Sort ascending' : 'Sort descending'
+              }
+              title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+              className="rounded-lg border border-gray-300 bg-white p-1.5 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+            >
+              <svg
+                className={`w-3 h-3 transition-transform ${sortDirection === 'asc' ? 'rotate-180' : ''}`}
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 10 6"
+              >
+                <path
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M9 5 5 1 1 5"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
         <div className="hidden md:grid bg-gray-50 dark:bg-gray-700 px-3 sm:px-6 py-3 text-xs text-gray-700 dark:text-gray-400 uppercase font-semibold grid-cols-4 gap-4 border-y border-gray-200 dark:border-gray-600">
           <div>Name</div>
