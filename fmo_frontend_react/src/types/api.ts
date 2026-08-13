@@ -52,6 +52,33 @@ export interface GuardianHealthLatest {
 
 export type FederationHealth = 'online' | 'degraded' | 'offline';
 
+/// A half-open time interval [start, end) in unix epoch seconds.
+export interface TimeInterval {
+  start: number;
+  end: number;
+}
+
+/// One guardian's lane in the outage timeline: its display name plus the
+/// maximal runs during which it was observed offline within the window.
+export interface GuardianLane {
+  guardian_id: number;
+  name: string;
+  offline_intervals: TimeInterval[];
+}
+
+/// Guardian outage timeline for a federation over a time window. One lane per
+/// guardian plus the windows where the federation was inoperable (fewer than
+/// `threshold` guardians online, so consensus could not be reached). All times
+/// are unix epoch seconds.
+export interface GuardianTimeline {
+  window_start: number;
+  window_end: number;
+  num_guardians: number;
+  threshold: number;
+  guardians: GuardianLane[];
+  inoperable_intervals: TimeInterval[];
+}
+
 export interface NavItem {
   name: string;
   href: string;

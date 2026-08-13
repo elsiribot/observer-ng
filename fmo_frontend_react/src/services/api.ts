@@ -3,6 +3,7 @@ import type {
   FedimintTotals,
   FederationSummary,
   GatewayInfo,
+  GuardianTimeline,
   SessionItem,
   SessionSummary,
   TxDetail,
@@ -117,6 +118,14 @@ export const api = {
   getGateways: (federationId: string, window: string = '7d') =>
     request<GatewayInfo[]>(
       `/federations/${federationId}/gateways${toQueryString({ window })}`
+    ),
+
+  // Guardian outage timeline over the given window (7d | 30d; backend default
+  // 30d): per-guardian offline intervals plus federation-wide inoperable
+  // (quorum-lost) intervals.
+  getGuardianTimeline: (federationId: string, window: string = '30d') =>
+    request<GuardianTimeline>(
+      `/federations/${federationId}/health/timeline${toQueryString({ window })}`
     ),
 };
 
