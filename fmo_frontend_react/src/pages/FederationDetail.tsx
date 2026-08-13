@@ -364,7 +364,7 @@ export function FederationDetail() {
                 return (
                   <div key={guardian.id} className="border-b border-gray-200 dark:border-gray-700 pb-3 sm:pb-4 last:border-0">
                     <div className="font-medium text-sm sm:text-base text-gray-900 dark:text-white mb-1">
-                      Guardian {guardian.id}
+                      {guardian.name}
                     </div>
                     <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 mb-2 break-all">
                       {guardian.url}
@@ -795,10 +795,10 @@ async function fetchFederationConfig(federationId: string, inviteCode: string): 
 
 function parseConfig(config: Record<string, unknown>): FederationConfig {
   // Parse guardians
-  const guardians: Guardian[] = (config.global as { api_endpoints?: Record<string, { url?: string }> })?.api_endpoints
-    ? Object.entries((config.global as { api_endpoints: Record<string, { url?: string }> }).api_endpoints).map(([id, endpoint]) => ({
+  const guardians: Guardian[] = (config.global as { api_endpoints?: Record<string, { url?: string; name?: string }> })?.api_endpoints
+    ? Object.entries((config.global as { api_endpoints: Record<string, { url?: string; name?: string }> }).api_endpoints).map(([id, endpoint]) => ({
         id: parseInt(id),
-        name: `Guardian ${id}`,
+        name: endpoint.name || `Guardian ${id}`,
         url: endpoint.url || 'Unknown',
         online: false, // Will be determined by health endpoint
         session: 0, // Will be updated by health endpoint
