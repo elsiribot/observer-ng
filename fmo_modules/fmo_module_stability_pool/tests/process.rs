@@ -1,7 +1,9 @@
 use std::str::FromStr;
 use std::time::{Duration, UNIX_EPOCH};
 
-use fedimint_core::core::{DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
+use fedimint_core::core::{
+    DynInput, DynModuleConsensusItem, DynOutput, IntoDynInstance, ModuleKind,
+};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::secp256k1::PublicKey;
@@ -9,10 +11,11 @@ use fedimint_core::{Amount, PeerId, TransactionId};
 use fmo_core::module::{CiMeta, ItemMeta, ObserverModule, ProcessCtx};
 use fmo_core::test_util::{insert_federation, minimal_config, reset_db, test_pool, test_services};
 use fmo_module_stability_pool::spec::{
-    Account, AccountType, DepositToProvideOutput, DepositToSeekOutput, FeeRate, FiatAmount,
-    FiatOrAll, ProvideRequest, SeekRequest, StabilityPoolConsensusItem,
-    StabilityPoolConsensusItemV0, StabilityPoolInput, StabilityPoolInputV0, StabilityPoolOutput,
-    StabilityPoolOutputV0, UnlockForWithdrawalInput, WithdrawalInput,
+    Account, AccountType, BtcBalanceDepositMetadata, DepositToBtcBalanceOutput,
+    DepositToProvideOutput, DepositToSeekOutput, FeeRate, FiatAmount, FiatOrAll, ProvideRequest,
+    SeekRequest, StabilityPoolConsensusItem, StabilityPoolConsensusItemV0, StabilityPoolInput,
+    StabilityPoolInputV0, StabilityPoolOutput, StabilityPoolOutputV0, StabilityPoolOutputV1,
+    UnlockForWithdrawalInput, WithdrawalInput,
 };
 use fmo_module_stability_pool::StabilityPoolObserver;
 
@@ -84,8 +87,8 @@ async fn stability_pool_resolves_input_output_and_ci_amounts() {
     let txid = TransactionId::consensus_decode_whole(&[7; 32], &Default::default()).unwrap();
     let txid_bytes = txid.consensus_encode_to_vec();
 
-    // Structural rows required by the withdrawals/deposits foreign keys. Two
-    // inputs (indices 0,1) and two outputs (indices 0,1).
+    // Structural rows required by the withdrawals/deposits foreign keys.
+    // Inputs and outputs at indices 0..4.
     {
         let conn = pool.get().await.unwrap();
         conn.execute("INSERT INTO sessions VALUES ($1, 0, ''::bytea)", &[&fed])
@@ -97,7 +100,7 @@ async fn stability_pool_resolves_input_output_and_ci_amounts() {
         )
         .await
         .unwrap();
-        for idx in 0..2i32 {
+        for idx in 0..4i32 {
             conn.execute(
                 "INSERT INTO transaction_inputs
                  VALUES ($1, $2, $3, 'multi_sig_stability_pool', NULL, NULL)",
@@ -165,6 +168,43 @@ async fn stability_pool_resolves_input_output_and_ci_amounts() {
         .await
         .unwrap();
     assert_eq!(processed.amount, Some(Amount::from_msats(8000)));
+
+    // Output 2: V1-exclusive DepositToBtcBalance of 12000 msat. The newest
+    // output variant; only reachable through the V1 enum.
+    let btc_balance_output = StabilityPoolOutput::V1(StabilityPoolOutputV1::DepositToBtcBalance(
+        DepositToBtcBalanceOutput {
+            account_id: Account::single(
+                PublicKey::from_str(NONCE).unwrap(),
+                AccountType::BtcDepositor,
+            )
+            .id(),
+            seek_request: SeekRequest(Amount::from_msats(12000)),
+            metadata: BtcBalanceDepositMetadata(vec![0xde, 0xad, 0xbe, 0xef]),
+        },
+    ));
+    let dyn_output: DynOutput = decode_dyn(&btc_balance_output);
+    let processed = module
+        .process_output(&mut ctx, &dyn_output, &item(2))
+        .await
+        .unwrap();
+    assert_eq!(processed.amount, Some(Amount::from_msats(12000)));
+    assert!(processed.details.is_some());
+
+    // Output 3: an unknown future output version (the extensible-type Default
+    // variant). The module must degrade gracefully: no amount, JSON details,
+    // no panic. Built via into_dyn so the concrete Default value reaches the
+    // hook without relying on the decoder's own default framing.
+    let unknown_output = StabilityPoolOutput::Default {
+        variant: 42,
+        bytes: vec![1, 2, 3, 4],
+    }
+    .into_dyn(0);
+    let processed = module
+        .process_output(&mut ctx, &unknown_output, &item(3))
+        .await
+        .unwrap();
+    assert_eq!(processed.amount, None);
+    assert!(processed.details.is_some());
 
     // Input 0: withdraw 3000 msat from the pool into the tx.
     let withdrawal: StabilityPoolInput = StabilityPoolInputV0::Withdrawal(WithdrawalInput {
@@ -240,6 +280,30 @@ async fn stability_pool_resolves_input_output_and_ci_amounts() {
         .unwrap()
         .get(0);
     assert_eq!(provide_fee, Some(150));
+
+    // The V1 btc-balance deposit is recorded with version 1 and its amount.
+    let btc_balance_amount: i64 = conn
+        .query_one(
+            "SELECT amount_msat FROM fmo_multi_sig_stability_pool.deposits
+             WHERE federation_id = $1 AND action = 'deposit_to_btc_balance' AND version = 1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(btc_balance_amount, 12000);
+
+    // The unknown-version output degraded gracefully: no deposits row written.
+    let unknown_rows: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM fmo_multi_sig_stability_pool.deposits
+             WHERE federation_id = $1 AND out_index = 3",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unknown_rows, 0);
 
     let unlock_fiat: Option<i64> = conn
         .query_one(
