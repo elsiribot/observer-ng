@@ -36,7 +36,7 @@ async fn core_schema_applies_and_is_idempotent() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(v, 6);
+    assert_eq!(v, 7);
     // gold tables exist
     conn.execute(
         "INSERT INTO gold_progress (federation_id, next_session_index) VALUES ($1, 0)",
