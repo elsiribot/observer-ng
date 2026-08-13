@@ -470,24 +470,47 @@ impl FederationObserver {
         // same session remain ambiguous, but that is transient until one
         // finalizes.) This mirrors `LATEST_RESOLVED_UTXO_FROM` in the walletv2
         // module.
+        // Only trust the exact UTXO value once (a) walletv2 has replayed to the
+        // federation's tip AND (b) the LATEST recorded transition is resolved.
+        // Otherwise the "latest resolved" row is a stale intermediate UTXO from
+        // partway through the replay/esplora backfill — using it would show a
+        // wrong historical balance. Until both hold, fall back to netting (a
+        // close estimate). Note the inner pick does NOT filter on resolved: we
+        // want the value of the genuinely-latest recorded transition (NULL if
+        // it isn't resolved yet), not the latest resolved one.
+        #[derive(Debug, FromRow)]
+        struct Walletv2ExactRow {
+            latest_utxo_msat: Option<i64>,
+            caught_up: bool,
+        }
         let walletv2_exact_msat = if self.walletv2_utxos_table_exists(&conn).await? {
-            query_value::<Option<i64>>(
+            let row = query_one::<Walletv2ExactRow>(
                 &conn,
-                "SELECT (
-                    SELECT utxo_value_msat
-                    FROM (
+                "SELECT
+                    (SELECT utxo_value_msat FROM (
                         SELECT DISTINCT ON (txid)
                                txid, session_index, item_index, utxo_value_msat
                         FROM fmo_walletv2.wallet_utxos
-                        WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                        WHERE federation_id = $1
                         ORDER BY txid, session_index ASC, item_index ASC
                     ) firsts
                     ORDER BY session_index DESC, item_index DESC
-                    LIMIT 1
-                )",
+                    LIMIT 1) AS latest_utxo_msat,
+                    COALESCE(
+                        (SELECT next_session_index FROM module_progress
+                         WHERE module_kind = 'walletv2' AND federation_id = $1)
+                        >= (SELECT COALESCE(MAX(session_index), 0) + 1 FROM sessions
+                            WHERE federation_id = $1 AND data IS NOT NULL),
+                        false
+                    ) AS caught_up",
                 &[&fed],
             )
-            .await?
+            .await?;
+            if row.caught_up {
+                row.latest_utxo_msat
+            } else {
+                None
+            }
         } else {
             None
         };

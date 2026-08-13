@@ -346,6 +346,15 @@ async fn walletv2_assets_use_exact_resolved_utxo() {
     )
     .await
     .unwrap();
+    // walletv2 has replayed past the tip (seed inserts only session 0), so the
+    // exact value is trusted.
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('walletv2', $1, 100)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
     drop(conn);
 
     let observer = FederationObserver::new_without_tasks(
@@ -361,6 +370,68 @@ async fn walletv2_assets_use_exact_resolved_utxo() {
     // wallet net (10M) + exact latest walletv2 UTXO (80M) = 90M; NOT the
     // walletv2 netting path (10M + 99M = 109M).
     assert_eq!(assets, fedimint_core::Amount::from_msats(90_000_000));
+}
+
+/// During replay (walletv2 NOT yet caught up to the federation's tip), the
+/// "latest resolved" row is a stale intermediate UTXO from partway through the
+/// backfill. Assets must fall back to netting until walletv2 has replayed to
+/// the tip, NOT show that stale historical value.
+#[tokio::test]
+async fn walletv2_assets_use_netting_during_replay() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    seed_wallet_assets(&conn, &fed, 10_000_000, 99_000_000).await;
+    // Federation has sessions up to index 10 (tip), but walletv2 has only
+    // replayed to session 3 -> NOT caught up.
+    for s in 1..=10i32 {
+        conn.execute(
+            "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, $2, ''::bytea)",
+            &[&fed, &s],
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('walletv2', $1, 3)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    create_walletv2_utxos_table(&conn).await;
+    // A resolved (but stale, mid-replay) intermediate UTXO.
+    conn.execute(
+        "INSERT INTO fmo_walletv2.wallet_utxos
+             (federation_id, session_index, item_index, txid, utxo_value_msat, resolved_at)
+         VALUES ($1, 2, 0, '\\xaa', 5000000, NOW()::timestamp)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let assets = observer.get_federation_assets(federation_id).await.unwrap();
+    // NOT caught up -> netting (10M + 99M = 109M), not the stale 5M UTXO.
+    assert_eq!(assets, fedimint_core::Amount::from_msats(109_000_000));
 }
 
 /// With no resolved walletv2 UTXO yet (backfill not done), assets fall back to
@@ -381,11 +452,19 @@ async fn walletv2_assets_fall_back_to_netting_when_unresolved() {
     let conn = pool.get().await.unwrap();
     seed_wallet_assets(&conn, &fed, 10_000_000, 99_000_000).await;
     create_walletv2_utxos_table(&conn).await;
-    // Only UNRESOLVED rows (NULL value) -> no exact value available.
+    // Only UNRESOLVED rows (NULL value) -> no exact value available even though
+    // walletv2 is caught up (tests the backfill-lag path, not the replay path).
     conn.execute(
         "INSERT INTO fmo_walletv2.wallet_utxos
              (federation_id, session_index, item_index, txid)
          VALUES ($1, 3, 6, '\\xbb')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('walletv2', $1, 100)",
         &[&fed],
     )
     .await
@@ -441,6 +520,13 @@ async fn walletv2_assets_rank_latest_utxo_by_first_appearance() {
              ($1, 2, 0, '\\xaa', 50000000, NOW()::timestamp),
              ($1, 3, 0, '\\xbb', 80000000, NOW()::timestamp),
              ($1, 4, 0, '\\xaa', 50000000, NOW()::timestamp)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO module_progress (module_kind, federation_id, next_session_index)
+         VALUES ('walletv2', $1, 100)",
         &[&fed],
     )
     .await
