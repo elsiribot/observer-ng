@@ -26,6 +26,7 @@ use tracing::warn;
 use crate::api::consensus::ConsensusItemRow;
 use crate::api::sql_fragments::USER_TX_LATERAL;
 use crate::api::AppState;
+use crate::live::Watermark;
 use crate::observer::FederationObserver;
 use crate::query::query;
 
@@ -158,20 +159,31 @@ pub(super) async fn federation_live(
         let wm = rx.borrow_and_update().clone();
         let mut cursor = (wm.session_index, -1i64);
 
-        match observer
-            .federation_live_items(federation_id, Some(cursor), (wm.session_index, wm.item_index))
-            .await
-        {
-            Ok(items) => {
-                for item in items {
-                    cursor = (item.session_index, item.item_index);
-                    match Event::default().json_data(&item) {
-                        Ok(event) => yield Ok(event),
-                        Err(e) => warn!("Failed to encode live session item as SSE event: {e:?}"),
+        // Skip the initial read while the watermark is still `Watermark::default()`
+        // (session 0, item 0, not rolled over). That value means no *live* poll
+        // has ticked yet -- the fetcher is still in `catch_up`, or the open
+        // session is empty/`Initial` -- NOT that session 0 item 0 is genuinely
+        // live. Reading with it would emit that stale historical item as if it
+        // were live (rendering a phantom "Session 0" in the client). The loop
+        // below serves everything once the first real live poll ticks.
+        if wm != Watermark::default() {
+            match observer
+                .federation_live_items(federation_id, Some(cursor), (wm.session_index, wm.item_index))
+                .await
+            {
+                Ok(items) => {
+                    for item in items {
+                        cursor = (item.session_index, item.item_index);
+                        match Event::default().json_data(&item) {
+                            Ok(event) => yield Ok(event),
+                            Err(e) => warn!("Failed to encode live session item as SSE event: {e:?}"),
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(%federation_id, "federation_live_items failed on initial live read: {e:?}")
+                }
             }
-            Err(e) => warn!(%federation_id, "federation_live_items failed on initial live read: {e:?}"),
         }
 
         loop {
@@ -181,20 +193,22 @@ pub(super) async fn federation_live(
             }
             let wm = rx.borrow_and_update().clone();
 
-            // Clamp the lower bound to the start of the watermark's current
-            // session. `cursor` can be stale/behind `wm.session_index` --
-            // e.g. a fresh connection's watch starts at
-            // `Watermark::default()` (session 0) and only ticks on the
-            // first *live* poll, never during `catch_up`, so after a
-            // process restart the first tick can jump straight from
-            // session 0 to whatever session is live now. Reading from a
-            // stale `cursor` in that case would span the entire gap as an
-            // ascending full-history scan instead of tailing just the live
-            // session. Jumping to `(wm.session_index, -1)` preserves
-            // within-session incremental delivery (the common case, where
-            // `cursor.0 == wm.session_index` and we keep the fine cursor)
-            // while preventing a cross-session historical replay.
-            let lower = if cursor.0 < wm.session_index {
+            // Clamp the lower bound only when `cursor` is MORE THAN one session
+            // behind `wm.session_index` -- i.e. a genuine restart gap (a fresh
+            // connection's watch starts at `Watermark::default()` and, after a
+            // process restart, the first tick can jump straight from session 0
+            // to whatever session is live now). Reading from a far-behind
+            // `cursor` there would span the whole gap as an ascending
+            // full-history scan, so we jump to `(wm.session_index, -1)`.
+            //
+            // A cursor exactly ONE session behind is the NORMAL rollover case:
+            // session N just signed and N+1 is live. We must NOT clamp then --
+            // `finalize_live_session` commits session N's tail before publishing
+            // the final watermark, and if that watermark coalesces (watch keeps
+            // only the latest) with N+1's first, clamping to `(N+1, -1)` would
+            // skip N's un-served tail. Keeping the fine cursor lets the delta
+            // span `(N, cursor..last] ∪ (N+1, 0..]` with no gap or overlap.
+            let lower = if cursor.0 < wm.session_index - 1 {
                 (wm.session_index, -1i64)
             } else {
                 cursor
