@@ -251,3 +251,157 @@ async fn federation_summary_reports_all_time_totals() {
         fedimint_core::Amount::from_msats(1500)
     );
 }
+
+/// DDL mirroring `fmo_module_walletv2/schema/v1.sql` (the columns
+/// `get_federation_assets` reads). fmo_core can't depend on the module crate,
+/// so the test builds the table it queries directly; the module's own tests
+/// cover the real migration.
+async fn create_walletv2_utxos_table(conn: &deadpool_postgres::Object) {
+    conn.batch_execute(
+        "DROP SCHEMA IF EXISTS fmo_walletv2 CASCADE;
+         CREATE SCHEMA fmo_walletv2;
+         CREATE TABLE fmo_walletv2.wallet_utxos (
+             federation_id   BYTEA   NOT NULL,
+             session_index   INTEGER NOT NULL,
+             item_index      INTEGER NOT NULL,
+             txid            BYTEA   NOT NULL,
+             utxo_value_msat BIGINT,
+             address         TEXT,
+             resolved_at     TIMESTAMP,
+             PRIMARY KEY (federation_id, session_index, item_index)
+         );",
+    )
+    .await
+    .unwrap();
+}
+
+/// Inserts a v1 `wallet` deposit and a `walletv2` deposit whose exact
+/// input/output netting is deliberately WRONG, so the test proves that the
+/// walletv2 portion comes from the latest RESOLVED consolidated-UTXO value,
+/// not the netting.
+async fn seed_wallet_assets(
+    conn: &deadpool_postgres::Object,
+    fed: &[u8],
+    wallet_net_msat: i64,
+    walletv2_wrong_net_msat: i64,
+) {
+    conn.execute(
+        "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, 0, ''::bytea)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transactions (federation_id, txid, session_index, item_index, data)
+         VALUES ($1, $2, 0, 0, ''::bytea), ($1, $3, 0, 1, ''::bytea)",
+        &[&fed, &b"wtx_v1".to_vec(), &b"wtx_v2".to_vec()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transaction_inputs (federation_id, txid, in_index, kind, amount_msat)
+         VALUES ($1, $2, 0, 'wallet', $4), ($1, $3, 0, 'walletv2', $5)",
+        &[
+            &fed,
+            &b"wtx_v1".to_vec(),
+            &b"wtx_v2".to_vec(),
+            &wallet_net_msat,
+            &walletv2_wrong_net_msat,
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+/// `get_federation_assets` uses the EXACT latest resolved walletv2 UTXO value
+/// (plus the v1 wallet netting), ignoring the fee-approximate walletv2
+/// input/output netting.
+#[tokio::test]
+async fn walletv2_assets_use_exact_resolved_utxo() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    // wallet net = 10_000_000; walletv2 netting = 99_000_000 (wrong on purpose)
+    seed_wallet_assets(&conn, &fed, 10_000_000, 99_000_000).await;
+    create_walletv2_utxos_table(&conn).await;
+
+    // Two resolved transitions; the latest (session 3, item 6) is the current
+    // consolidated UTXO = 80_000_000 msat.
+    conn.execute(
+        "INSERT INTO fmo_walletv2.wallet_utxos
+             (federation_id, session_index, item_index, txid, utxo_value_msat, resolved_at)
+         VALUES
+             ($1, 2, 0, '\\xaa', 50000000, NOW()::timestamp),
+             ($1, 3, 6, '\\xbb', 80000000, NOW()::timestamp)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let assets = observer.get_federation_assets(federation_id).await.unwrap();
+    // wallet net (10M) + exact latest walletv2 UTXO (80M) = 90M; NOT the
+    // walletv2 netting path (10M + 99M = 109M).
+    assert_eq!(assets, fedimint_core::Amount::from_msats(90_000_000));
+}
+
+/// With no resolved walletv2 UTXO yet (backfill not done), assets fall back to
+/// the input/output netting so the value is never worse than before.
+#[tokio::test]
+async fn walletv2_assets_fall_back_to_netting_when_unresolved() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    seed_wallet_assets(&conn, &fed, 10_000_000, 99_000_000).await;
+    create_walletv2_utxos_table(&conn).await;
+    // Only UNRESOLVED rows (NULL value) -> no exact value available.
+    conn.execute(
+        "INSERT INTO fmo_walletv2.wallet_utxos
+             (federation_id, session_index, item_index, txid)
+         VALUES ($1, 3, 6, '\\xbb')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let assets = observer.get_federation_assets(federation_id).await.unwrap();
+    // Falls back to netting: wallet (10M) + walletv2 net (99M) = 109M.
+    assert_eq!(assets, fedimint_core::Amount::from_msats(109_000_000));
+}
