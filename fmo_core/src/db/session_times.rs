@@ -6,6 +6,11 @@
 //! timestamp. It used to be a materialized view rebuilt in full every refresh
 //! cycle, which on the production dataset took hours (see schema/core/v6.sql).
 //!
+//! Each row also stores `next_vote_time`, the mirror-image backward-fill: the
+//! nearest vote AT-OR-AFTER the session (NULL for sessions past the last known
+//! vote). `(estimated_session_timestamp, next_vote_time)` bracket a vote-less
+//! session's true time, giving the explorer an uncertainty interval.
+//!
 //! The value for a session is a deterministic function of that session's votes,
 //! and a session's votes are final once every installed module has processed it
 //! (the same "frontier" the gold cursor tracks). So the finalized prefix never
@@ -37,18 +42,28 @@ pub async fn recompute_full(conn: &impl deadpool_postgres::GenericClient) -> any
          ),
          grouped AS (
              SELECT *,
+                    -- Forward-fill group: increments at each voted session, so
+                    -- FIRST_VALUE ASC carries the nearest vote at-or-before.
                     SUM(CASE WHEN ts IS NOT NULL THEN 1 ELSE 0 END)
-                        OVER (PARTITION BY federation_id ORDER BY session_index) AS grp
+                        OVER (PARTITION BY federation_id ORDER BY session_index) AS grp,
+                    -- Backward-fill group: the same running count over the
+                    -- reversed order, so FIRST_VALUE DESC carries the nearest
+                    -- vote at-or-after.
+                    SUM(CASE WHEN ts IS NOT NULL THEN 1 ELSE 0 END)
+                        OVER (PARTITION BY federation_id ORDER BY session_index DESC) AS grp_desc
              FROM all_sessions
          )
-         INSERT INTO session_times (federation_id, session_index, estimated_session_timestamp)
+         INSERT INTO session_times (federation_id, session_index, estimated_session_timestamp, next_vote_time)
          SELECT federation_id,
                 session_index,
                 FIRST_VALUE(ts) OVER (PARTITION BY federation_id, grp ORDER BY session_index)
-                    AS estimated_session_timestamp
+                    AS estimated_session_timestamp,
+                FIRST_VALUE(ts) OVER (PARTITION BY federation_id, grp_desc ORDER BY session_index DESC)
+                    AS next_vote_time
          FROM grouped
          ON CONFLICT (federation_id, session_index)
-         DO UPDATE SET estimated_session_timestamp = EXCLUDED.estimated_session_timestamp",
+         DO UPDATE SET estimated_session_timestamp = EXCLUDED.estimated_session_timestamp,
+                       next_vote_time = EXCLUDED.next_vote_time",
     )
     .await?;
     Ok(())
@@ -136,8 +151,13 @@ impl FederationObserver {
                  ),
                  grouped AS (
                      SELECT session_index, ts,
+                            -- Forward-fill group (nearest vote at-or-before).
                             SUM(CASE WHEN ts IS NOT NULL THEN 1 ELSE 0 END)
-                                OVER (ORDER BY session_index) AS grp
+                                OVER (ORDER BY session_index) AS grp,
+                            -- Backward-fill group (nearest vote at-or-after),
+                            -- scoped to this [start, max] window only.
+                            SUM(CASE WHEN ts IS NOT NULL THEN 1 ELSE 0 END)
+                                OVER (ORDER BY session_index DESC) AS grp_desc
                      FROM tail
                  ),
                  filled AS (
@@ -145,13 +165,20 @@ impl FederationObserver {
                             COALESCE(
                                 FIRST_VALUE(ts) OVER (PARTITION BY grp ORDER BY session_index),
                                 (SELECT carry FROM seed)
-                            ) AS estimated_session_timestamp
+                            ) AS estimated_session_timestamp,
+                            -- No seed carry: sessions after the last vote in the
+                            -- window have grp_desc = 0 (all-NULL group), so
+                            -- FIRST_VALUE is NULL -- an unbounded upper bound for
+                            -- the most recent sessions, which is correct.
+                            FIRST_VALUE(ts) OVER (PARTITION BY grp_desc ORDER BY session_index DESC)
+                                AS next_vote_time
                      FROM grouped
                  )
-                 INSERT INTO session_times (federation_id, session_index, estimated_session_timestamp)
-                 SELECT $1, session_index, estimated_session_timestamp FROM filled
+                 INSERT INTO session_times (federation_id, session_index, estimated_session_timestamp, next_vote_time)
+                 SELECT $1, session_index, estimated_session_timestamp, next_vote_time FROM filled
                  ON CONFLICT (federation_id, session_index)
-                 DO UPDATE SET estimated_session_timestamp = EXCLUDED.estimated_session_timestamp",
+                 DO UPDATE SET estimated_session_timestamp = EXCLUDED.estimated_session_timestamp,
+                               next_vote_time = EXCLUDED.next_vote_time",
                 &[&fed, &start],
             )
             .await?;

@@ -873,6 +873,93 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
     }
 }
 
+/// `recompute_full` computes `next_vote_time` as the backward-fill (nearest
+/// vote AT-OR-AFTER a session), the mirror of `estimated_session_timestamp`'s
+/// forward-fill. Verified against the spec example: sessions 0..5 with votes at
+/// 2 (T2) and 5 (T5). A voted session has lower == upper (== its own vote); a
+/// forward-filled session has upper > lower.
+#[tokio::test]
+async fn session_times_next_vote_backward_fill() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    for idx in 0..6i32 {
+        conn.execute(
+            "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, $2, ''::bytea)",
+            &[&fed, &idx],
+        )
+        .await
+        .unwrap();
+    }
+    // Votes at sessions 2 (T2) and 5 (T5) only.
+    for (idx, ts) in [(2i32, "2024-01-03 00:00:00"), (5, "2024-01-06 00:00:00")] {
+        conn.execute(
+            &format!(
+                "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+                 VALUES ($1, $2, 'dummy', 0, '{ts}')"
+            ),
+            &[&fed, &idx],
+        )
+        .await
+        .unwrap();
+    }
+
+    fmo_core::db::session_times::recompute_full(&conn)
+        .await
+        .unwrap();
+
+    async fn times(
+        pool: &deadpool_postgres::Pool,
+        fed: &[u8],
+        idx: i32,
+    ) -> (Option<String>, Option<String>) {
+        let row = pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT estimated_session_timestamp::text, next_vote_time::text
+                 FROM session_times WHERE federation_id = $1 AND session_index = $2",
+                &[&fed, &idx],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    }
+
+    const T2: &str = "2024-01-03 00:00:00";
+    const T5: &str = "2024-01-06 00:00:00";
+
+    // Forward-fill (lower / estimated): 0,1 -> NULL; 2,3,4 -> T2; 5 -> T5.
+    // Backward-fill (upper / next_vote): 0,1,2 -> T2; 3,4,5 -> T5.
+    let expected: [(i32, Option<&str>, Option<&str>); 6] = [
+        (0, None, Some(T2)),
+        (1, None, Some(T2)),
+        (2, Some(T2), Some(T2)), // voted: lower == upper
+        (3, Some(T2), Some(T5)), // forward-filled: upper > lower
+        (4, Some(T2), Some(T5)),
+        (5, Some(T5), Some(T5)), // voted
+    ];
+    for (idx, lower, upper) in expected {
+        let (est, next) = times(&pool, &fed, idx).await;
+        assert_eq!(est.as_deref(), lower, "estimated (lower) for session {idx}");
+        assert_eq!(
+            next.as_deref(),
+            upper,
+            "next_vote (upper) for session {idx}"
+        );
+    }
+}
+
 /// `refresh_session_times` must freeze the finalized prefix (below the module
 /// frontier) while recomputing the still-processing tail: a late vote for a
 /// frozen session is ignored, a new vote for a tail session is picked up, and a
@@ -1003,5 +1090,41 @@ async fn session_times_freezes_finalized_prefix() {
         ts_text(&pool, &fed, 4).await.as_deref(),
         Some("2024-07-07 00:00:00"),
         "tail session must pick up a new vote"
+    );
+
+    // `next_vote_time` (backward-fill / upper bound) tracks the same
+    // freeze/tail split as the forward-fill.
+    async fn next_text(pool: &deadpool_postgres::Pool, fed: &[u8], idx: i32) -> Option<String> {
+        pool.get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT next_vote_time::text FROM session_times
+                 WHERE federation_id = $1 AND session_index = $2",
+                &[&fed, &idx],
+            )
+            .await
+            .unwrap()
+            .get::<_, Option<String>>(0)
+    }
+    // Frozen session 1's upper was backward-filled to session 2's vote at
+    // freeze time and stays there, ignoring the late vote (frozen).
+    assert_eq!(
+        next_text(&pool, &fed, 1).await.as_deref(),
+        Some("2024-01-03 00:00:00"),
+        "frozen session's next_vote keeps its at-freeze value"
+    );
+    // Voted session 2: upper == its own vote (== lower).
+    assert_eq!(
+        next_text(&pool, &fed, 2).await.as_deref(),
+        Some("2024-01-03 00:00:00"),
+        "voted session has upper == its own vote"
+    );
+    // Tail session 3 (no vote): upper is the nearest vote at-or-after within
+    // the recompute window -- session 4's new (larger) vote.
+    assert_eq!(
+        next_text(&pool, &fed, 3).await.as_deref(),
+        Some("2024-07-07 00:00:00"),
+        "tail forward-filled session's upper is the next vote after it"
     );
 }
