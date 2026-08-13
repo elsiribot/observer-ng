@@ -16,6 +16,21 @@ const RECEIVE_ADDRESS: &str = "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw";
 /// serialize the DB-touching tests within this binary.
 static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Resets the public (core) schema and drops any leftover `fmo_walletv2`
+/// schema. `reset_db` only touches `public`, but a prior test binary (e.g.
+/// fmo_core's assets tests) may have left an `fmo_walletv2` schema behind;
+/// without dropping it, `setup_module_schema` would re-run the module
+/// migrations over the existing tables and collide.
+async fn reset_all(pool: &deadpool_postgres::Pool) {
+    reset_db(pool).await;
+    pool.get()
+        .await
+        .unwrap()
+        .batch_execute("DROP SCHEMA IF EXISTS fmo_walletv2 CASCADE")
+        .await
+        .unwrap();
+}
+
 fn test_pk() -> fedimint_core::secp256k1::PublicKey {
     fedimint_core::secp256k1::PublicKey::from_str(
         "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -30,7 +45,7 @@ async fn walletv2_processes_receives_sends_and_block_count_votes() {
         eprintln!("skipping: FMO_TEST_DATABASE unset");
         return;
     };
-    reset_db(&pool).await;
+    reset_all(&pool).await;
     let (config, federation_id) = minimal_config();
     insert_federation(&pool, &config, federation_id).await;
     let services = test_services(&pool);
@@ -204,7 +219,7 @@ async fn walletv2_records_signatures_txid_for_utxo_resolution() {
         eprintln!("skipping: FMO_TEST_DATABASE unset");
         return;
     };
-    reset_db(&pool).await;
+    reset_all(&pool).await;
     let (config, federation_id) = minimal_config();
     insert_federation(&pool, &config, federation_id).await;
     let services = test_services(&pool);

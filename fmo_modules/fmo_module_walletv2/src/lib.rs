@@ -1,6 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::extract::{Path, State};
@@ -8,18 +8,22 @@ use axum::routing::get;
 use axum::{Json, Router};
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, OutPoint, Txid};
+use fedimint_api_client::api::{DynGlobalApi, FederationApiExt};
 use fedimint_core::config::FederationId;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::module::CommonModuleInit;
+use fedimint_core::module::{ApiRequestErased, CommonModuleInit};
 use fedimint_core::Amount;
-use fedimint_walletv2_common::{WalletCommonInit, WalletConsensusItem, WalletInput, WalletOutput};
+use fedimint_walletv2_common::endpoint_constants::FEDERATION_WALLET_ENDPOINT;
+use fedimint_walletv2_common::{
+    FederationWallet, WalletCommonInit, WalletConsensusItem, WalletInput, WalletOutput,
+};
 use fmo_api_types::FederationUtxo;
 use fmo_core::api::ModuleApiState;
 use fmo_core::module::{
     CiMeta, ItemMeta, Migration, ModuleTaskCtx, ObserverModule, ProcessCtx, ProcessedItem,
 };
-use fmo_core::query::query;
+use fmo_core::query::{query, query_value};
 use postgres_from_row::FromRow;
 use tracing::{debug, warn};
 
@@ -43,6 +47,20 @@ const RESOLVE_BATCH_SIZE: i64 = 20;
 fn resolver_idle_sleep() -> Duration {
     Duration::from_secs(30)
 }
+
+/// How often the verification poll asks the guardians for their live
+/// `federation_wallet` and compares it to our derived balance.
+const VERIFY_POLL_INTERVAL: Duration = Duration::from_secs(300);
+
+/// How long a value mismatch must persist before we `warn!`. Our derived
+/// balance legitimately lags the live one briefly (a new transition, or the
+/// resolver / esplora catching up); only a mismatch sustained past this is a
+/// real problem worth surfacing.
+const VERIFY_SUSTAINED_DIVERGENCE: Duration = Duration::from_secs(30 * 60);
+
+/// Values must match exactly once caught up; any nonzero difference sustained
+/// past `VERIFY_SUSTAINED_DIVERGENCE` is flagged.
+const VERIFY_TOLERANCE_MSAT: i64 = 0;
 
 #[async_trait::async_trait]
 impl ObserverModule for WalletV2Observer {
@@ -231,29 +249,37 @@ impl ObserverModule for WalletV2Observer {
         Ok(serde_json::to_value(wallet_ci).ok())
     }
 
-    /// Resolves the on-chain values of recorded wallet-tx txids from an
-    /// explorer, out-of-band from the processing transaction. This also
-    /// throttles the one-time historical backfill triggered by the version
-    /// bump.
+    /// Runs the two walletv2 background loops concurrently on this single
+    /// per-(module, federation) task:
+    /// - the UTXO-value resolver (fills in exact on-chain balances), and
+    /// - the `federation_wallet` verification poll (a monitoring cross-check
+    ///   against the guardians' authoritative live UTXO).
     async fn run_federation_task(self: Arc<Self>, ctx: ModuleTaskCtx) {
-        let federation_id = ctx.federation_id;
-        loop {
-            match resolve_utxo_values(&ctx).await {
-                Ok(resolved) if resolved > 0 => {
-                    debug!("walletv2 resolved {resolved} UTXO value(s) for {federation_id}");
-                    // More may remain; loop again promptly to drain the
-                    // backfill without a full idle sleep.
-                    continue;
-                }
-                Ok(_) => {}
-                Err(e) => warn!("walletv2 UTXO resolver for {federation_id} failed: {e:?}"),
-            }
-            tokio::time::sleep(resolver_idle_sleep()).await;
-        }
+        tokio::join!(run_resolver_loop(&ctx), run_verification_loop(&ctx));
     }
 
     fn api_router(&self) -> Option<Router<ModuleApiState>> {
         Some(Router::new().route("/utxos", get(get_federation_utxos)))
+    }
+}
+
+/// Resolver loop: repeatedly drains unresolved wallet-tx txids from the
+/// explorer, out-of-band from the processing transaction. Also throttles the
+/// one-time historical backfill triggered by the version bump.
+async fn run_resolver_loop(ctx: &ModuleTaskCtx) {
+    let federation_id = ctx.federation_id;
+    loop {
+        match resolve_utxo_values(ctx).await {
+            Ok(resolved) if resolved > 0 => {
+                debug!("walletv2 resolved {resolved} UTXO value(s) for {federation_id}");
+                // More may remain; loop again promptly to drain the backfill
+                // without a full idle sleep.
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => warn!("walletv2 UTXO resolver for {federation_id} failed: {e:?}"),
+        }
+        tokio::time::sleep(resolver_idle_sleep()).await;
     }
 }
 
@@ -360,6 +386,128 @@ async fn resolve_one(
 
 fn hex_display(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Verification poll: periodically fetches the guardians' authoritative live
+/// `FederationWallet` and cross-checks its value against our derived balance
+/// (the latest resolved consolidated UTXO). This is a monitoring signal only —
+/// NOT the balance source — so a divergence is `warn!`-logged (once sustained)
+/// rather than acted upon. Silently no-ops for federations without a walletv2
+/// module.
+async fn run_verification_loop(ctx: &ModuleTaskCtx) {
+    let federation_id = ctx.federation_id;
+
+    let Some(instance_id) = ctx
+        .config
+        .modules
+        .iter()
+        .find_map(|(&id, module)| (module.kind.as_str() == KIND.as_str()).then_some(id))
+    else {
+        return;
+    };
+
+    let peers = ctx
+        .config
+        .global
+        .api_endpoints
+        .iter()
+        .map(|(&id, url)| (id, url.url.clone()))
+        .collect();
+    let api = match DynGlobalApi::new(ctx.connectors.clone(), peers, None) {
+        Ok(api) => api.with_module(instance_id),
+        Err(e) => {
+            warn!("walletv2 verification poll for {federation_id} could not build API: {e:?}");
+            return;
+        }
+    };
+
+    let mut interval = tokio::time::interval(VERIFY_POLL_INTERVAL);
+    let mut divergence_since: Option<Instant> = None;
+
+    loop {
+        interval.tick().await;
+
+        let Some(live) = fetch_live_federation_wallet(&api, ctx).await else {
+            // No peer returned a wallet yet (unfunded, or all unreachable);
+            // nothing to compare against, don't treat as divergence.
+            continue;
+        };
+        let live_msat = (live.value.to_sat() * 1000) as i64;
+
+        let derived_msat = match latest_resolved_value_msat(ctx).await {
+            Ok(Some(v)) => v,
+            // Nothing resolved yet (backfill in progress): can't compare, so
+            // don't accrue divergence.
+            Ok(None) => {
+                divergence_since = None;
+                continue;
+            }
+            Err(e) => {
+                warn!("walletv2 verification poll for {federation_id} DB read failed: {e:?}");
+                continue;
+            }
+        };
+
+        if (live_msat - derived_msat).abs() > VERIFY_TOLERANCE_MSAT {
+            let since = *divergence_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= VERIFY_SUSTAINED_DIVERGENCE {
+                warn!(
+                    federation = %federation_id,
+                    live_msat,
+                    derived_msat,
+                    live_outpoint = %live.outpoint,
+                    "walletv2 derived on-chain balance diverges from the live \
+                     federation_wallet by {} msat, sustained for {}s — investigate \
+                     (derived balance may be stale or a transition was missed)",
+                    live_msat - derived_msat,
+                    since.elapsed().as_secs(),
+                );
+            }
+        } else {
+            divergence_since = None;
+        }
+    }
+}
+
+/// Asks each peer in turn for its live `federation_wallet`, returning the first
+/// `Some` response. A monitoring cross-check, so a single honest peer's view is
+/// sufficient; unreachable peers and `None` (unfunded) are skipped.
+async fn fetch_live_federation_wallet(
+    api: &fedimint_api_client::api::DynModuleApi,
+    ctx: &ModuleTaskCtx,
+) -> Option<FederationWallet> {
+    for &peer_id in ctx.config.global.api_endpoints.keys() {
+        match api
+            .request_single_peer::<Option<FederationWallet>>(
+                FEDERATION_WALLET_ENDPOINT.to_owned(),
+                ApiRequestErased::default(),
+                peer_id,
+            )
+            .await
+        {
+            Ok(Some(wallet)) => return Some(wallet),
+            // Peer reachable but wallet unfunded — keep asking others in case
+            // one is ahead, but a unanimous None just means "nothing to check".
+            Ok(None) => continue,
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// The value (msat) of our latest RESOLVED consolidated UTXO, or `None` if the
+/// resolver hasn't produced one yet.
+async fn latest_resolved_value_msat(ctx: &ModuleTaskCtx) -> anyhow::Result<Option<i64>> {
+    let conn = ctx.pool.get().await?;
+    query_value::<Option<i64>>(
+        &conn,
+        "SELECT (SELECT utxo_value_msat FROM fmo_walletv2.wallet_utxos
+                 WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                 ORDER BY session_index DESC, item_index DESC
+                 LIMIT 1)",
+        &[&ctx.federation_id.consensus_encode_to_vec()],
+    )
+    .await
 }
 
 /// The federation's current on-chain UTXO(s). walletv2 keeps everything in a

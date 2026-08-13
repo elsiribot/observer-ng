@@ -2395,6 +2395,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "esplora-client 0.10.0",
+ "fedimint-api-client",
  "fedimint-core",
  "fedimint-walletv2-common",
  "fmo_api_types",
