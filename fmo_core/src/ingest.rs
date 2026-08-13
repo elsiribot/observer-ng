@@ -34,6 +34,8 @@ pub async fn ingest_session(
     )
     .await?;
 
+    // Historical/import path: no first-seen stamp. `synced_at` is only set on
+    // the live path (see `live_process`).
     ingest_items(
         dbtx,
         config,
@@ -41,6 +43,7 @@ pub async fn ingest_session(
         session_index,
         &session.items,
         0,
+        None,
     )
     .await
 }
@@ -57,6 +60,14 @@ pub async fn ingest_session(
 /// the `(federation_id, session_index)` FK before it signs. A no-op if
 /// `ingest_session` already inserted the row with real data.
 ///
+/// `synced_at`, when `Some`, is stamped onto the `transactions` /
+/// `consensus_items` rows this call inserts. It records the wall-clock time
+/// an item was first observed live and is only set on the live path
+/// ([`live_process`](crate::live::live_process)); the historical/import path
+/// passes `None`. Because every insert is `ON CONFLICT DO NOTHING`, the FIRST
+/// ingest's value wins, so a later historical replay of the same item never
+/// overwrites (nor clears) the original live first-seen stamp.
+///
 /// Shared by the live fetcher (which calls this incrementally as items
 /// arrive) and the historical/import path (which calls it once with
 /// `start = 0` via [`ingest_session`]). Idempotent.
@@ -67,6 +78,7 @@ pub async fn ingest_items(
     session_index: u64,
     items: &[AcceptedItem],
     start: usize,
+    synced_at: Option<chrono::NaiveDateTime>,
 ) -> anyhow::Result<()> {
     let federation_id_bytes = federation_id.consensus_encode_to_vec();
 
@@ -80,7 +92,8 @@ pub async fn ingest_items(
         .await?;
     let insert_transaction = dbtx
         .prepare_cached(
-            "INSERT INTO transactions VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            "INSERT INTO transactions (federation_id, txid, session_index, item_index, data, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
         )
         .await?;
     let insert_input = dbtx
@@ -97,8 +110,8 @@ pub async fn ingest_items(
         .await?;
     let insert_ci = dbtx
         .prepare_cached(
-            "INSERT INTO consensus_items (federation_id, session_index, item_index, peer_id, kind)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            "INSERT INTO consensus_items (federation_id, session_index, item_index, peer_id, kind, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
         )
         .await?;
 
@@ -146,6 +159,7 @@ pub async fn ingest_items(
                         &(session_index as i32),
                         &(item_index as i32),
                         &transaction.consensus_encode_to_vec(),
+                        &synced_at,
                     ],
                 )
                 .await?;
@@ -188,6 +202,7 @@ pub async fn ingest_items(
                         &(item_index as i32),
                         &(accepted_item.peer.to_usize() as i32),
                         &kind,
+                        &synced_at,
                     ],
                 )
                 .await?;

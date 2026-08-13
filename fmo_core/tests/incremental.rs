@@ -596,7 +596,7 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
     {
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        ingest_items(&dbtx, &config_a, fed_a, 0, &items, 0)
+        ingest_items(&dbtx, &config_a, fed_a, 0, &items, 0, None)
             .await
             .unwrap();
         dbtx.commit().await.unwrap();
@@ -621,7 +621,7 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
     {
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        ingest_items(&dbtx, &config_b, fed_b, 0, &items[..k], 0)
+        ingest_items(&dbtx, &config_b, fed_b, 0, &items[..k], 0, None)
             .await
             .unwrap();
         dbtx.commit().await.unwrap();
@@ -653,7 +653,7 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
 
         let mut conn = pool.get().await.unwrap();
         let dbtx = conn.transaction().await.unwrap();
-        ingest_items(&dbtx, &config_b, fed_b, 0, &items, k)
+        ingest_items(&dbtx, &config_b, fed_b, 0, &items, k, None)
             .await
             .unwrap();
         dbtx.commit().await.unwrap();

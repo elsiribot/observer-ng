@@ -521,3 +521,131 @@ async fn live_process_then_finalize() {
         );
     }
 }
+
+/// A live-observed item (ingested through `live_process`) gets a first-seen
+/// `synced_at` stamp on its `transactions` / `consensus_items` rows, while an
+/// item only ever seen through the historical/import path (`ingest_session`)
+/// has `synced_at = NULL`. This is what lets the explorer show an exact
+/// "observed" time for live items and fall back to the vote-based estimate for
+/// historical ones.
+#[tokio::test]
+async fn live_ingest_stamps_synced_at_historical_stays_null() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // No module registered: we only care about the structural ingest here.
+    let registry = ModuleRegistry::new(vec![]);
+    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+
+    // Session 1: ingested live -> synced_at is stamped.
+    let live_items = dummy_session(9_001).items;
+    live_process(
+        &pool,
+        &registry,
+        &services,
+        federation_id,
+        &config,
+        1,
+        &live_items,
+        0,
+    )
+    .await
+    .unwrap();
+
+    // Session 2: ingested historically via `ingest_session` -> synced_at NULL.
+    let historical_session = dummy_session(9_002);
+    {
+        let mut conn = pool.get().await.unwrap();
+        let dbtx = conn.transaction().await.unwrap();
+        fmo_core::ingest::ingest_session(&dbtx, &config, federation_id, 2, &historical_session)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+
+    let conn = pool.get().await.unwrap();
+
+    // Live session 1: both the transaction and the CI carry a non-NULL stamp.
+    let live_tx_synced: Option<chrono::NaiveDateTime> = conn
+        .query_one(
+            "SELECT synced_at FROM transactions WHERE federation_id = $1 AND session_index = 1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        live_tx_synced.is_some(),
+        "live-ingested transaction must have synced_at set"
+    );
+    let live_ci_synced: Option<chrono::NaiveDateTime> = conn
+        .query_one(
+            "SELECT synced_at FROM consensus_items WHERE federation_id = $1 AND session_index = 1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        live_ci_synced.is_some(),
+        "live-ingested consensus item must have synced_at set"
+    );
+
+    // Historical session 2: both rows have NULL synced_at.
+    let hist_tx_synced: Option<chrono::NaiveDateTime> = conn
+        .query_one(
+            "SELECT synced_at FROM transactions WHERE federation_id = $1 AND session_index = 2",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        hist_tx_synced.is_none(),
+        "historically-ingested transaction must have NULL synced_at"
+    );
+    let hist_ci_synced: Option<chrono::NaiveDateTime> = conn
+        .query_one(
+            "SELECT synced_at FROM consensus_items WHERE federation_id = $1 AND session_index = 2",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        hist_ci_synced.is_none(),
+        "historically-ingested consensus item must have NULL synced_at"
+    );
+
+    // First-seen wins: a historical replay over the live session must NOT
+    // clear the original live stamp (ON CONFLICT DO NOTHING).
+    {
+        let mut conn2 = pool.get().await.unwrap();
+        let dbtx = conn2.transaction().await.unwrap();
+        let replay = dummy_session(9_001);
+        fmo_core::ingest::ingest_session(&dbtx, &config, federation_id, 1, &replay)
+            .await
+            .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+    let live_tx_synced_after: Option<chrono::NaiveDateTime> = conn
+        .query_one(
+            "SELECT synced_at FROM transactions WHERE federation_id = $1 AND session_index = 1",
+            &[&fed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        live_tx_synced_after, live_tx_synced,
+        "a later historical replay must preserve the original live first-seen stamp"
+    );
+}

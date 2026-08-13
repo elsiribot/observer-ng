@@ -182,7 +182,21 @@ pub async fn live_process(
     let mut conn = pool.get().await?;
     let dbtx = conn.transaction().await?;
 
-    ingest_items(&dbtx, config, federation_id, session_index, items, start).await?;
+    // First-seen wall-clock stamp for the items this live poll newly observes.
+    // Computed once per call so all items in this batch share one stamp;
+    // `ingest_items`' `ON CONFLICT DO NOTHING` keeps the earliest one if a
+    // later poll or historical replay re-touches the same row.
+    let synced_at = chrono::Utc::now().naive_utc();
+    ingest_items(
+        &dbtx,
+        config,
+        federation_id,
+        session_index,
+        items,
+        start,
+        Some(synced_at),
+    )
+    .await?;
 
     for (kind, module) in registry.iter() {
         // Matches `process_module_batch`'s convention: a module's dispatch
