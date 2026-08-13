@@ -457,13 +457,34 @@ impl FederationObserver {
         // walletv2 module (and its schema) is registered at all — Postgres
         // validates all table references at parse time, so we can't reference
         // `fmo_walletv2.wallet_utxos` in a query unless it exists.
+        //
+        // "Latest resolved UTXO" ranks each txid by its FIRST appearance (min
+        // session_index, then min item_index within that session), not any
+        // appearance: the walletv2 server re-emits a `Signatures` CI for every
+        // still-unfinalized tx, once per peer, each session until it finalizes,
+        // and within a session those items are ordered by txid (BTreeMap key
+        // order), not creation order. So an older-but-still-pending tx
+        // re-announced in a later session can carry a higher `(session, item)`
+        // than the genuinely newer tx; first-appearance ranking avoids
+        // returning its stale value. (Two distinct txids first announced in the
+        // same session remain ambiguous, but that is transient until one
+        // finalizes.) This mirrors `LATEST_RESOLVED_UTXO_FROM` in the walletv2
+        // module.
         let walletv2_exact_msat = if self.walletv2_utxos_table_exists(&conn).await? {
             query_value::<Option<i64>>(
                 &conn,
-                "SELECT (SELECT utxo_value_msat FROM fmo_walletv2.wallet_utxos
-                         WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
-                         ORDER BY session_index DESC, item_index DESC
-                         LIMIT 1)",
+                "SELECT (
+                    SELECT utxo_value_msat
+                    FROM (
+                        SELECT DISTINCT ON (txid)
+                               txid, session_index, item_index, utxo_value_msat
+                        FROM fmo_walletv2.wallet_utxos
+                        WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                        ORDER BY txid, session_index ASC, item_index ASC
+                    ) firsts
+                    ORDER BY session_index DESC, item_index DESC
+                    LIMIT 1
+                )",
                 &[&fed],
             )
             .await?

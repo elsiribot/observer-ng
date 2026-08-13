@@ -294,3 +294,77 @@ async fn walletv2_records_signatures_txid_for_utxo_resolution() {
     assert_eq!(rows[0].get::<_, i32>("item_index"), 5);
     assert_eq!(rows[1].get::<_, i32>("item_index"), 6);
 }
+
+/// Validates, against the real `fmo_walletv2.wallet_utxos` schema, that the
+/// "latest resolved UTXO" query ranks txids by FIRST appearance: an older txid
+/// re-announced at a later (session, item) must not win over a newer txid whose
+/// first appearance is more recent. Mirrors `LATEST_RESOLVED_UTXO_FROM` in the
+/// module (kept in sync manually since it is private).
+#[tokio::test]
+async fn walletv2_latest_utxo_ranks_by_first_appearance() {
+    use bitcoin::hashes::Hash;
+
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_all(&pool).await;
+    let (config, federation_id) = minimal_config();
+    insert_federation(&pool, &config, federation_id).await;
+
+    let module = WalletV2Observer;
+    fmo_core::db::migrations::setup_module_schema(
+        &pool,
+        "walletv2",
+        module.version(),
+        module.migrations(),
+    )
+    .await
+    .unwrap();
+
+    let fed = federation_id.consensus_encode_to_vec();
+    let old_txid = bitcoin::Txid::from_byte_array([0xaa; 32]);
+    let new_txid = bitcoin::Txid::from_byte_array([0xbb; 32]);
+
+    let conn = pool.get().await.unwrap();
+    // OLD first appears at session 2 (50M), NEW at session 3 (80M), then OLD is
+    // RE-ANNOUNCED at session 4 (later than NEW's first appearance).
+    conn.execute(
+        "INSERT INTO fmo_walletv2.wallet_utxos
+             (federation_id, session_index, item_index, txid, utxo_value_msat, address, resolved_at)
+         VALUES
+             ($1, 2, 0, $2, 50000000, 'bc1old', NOW()::timestamp),
+             ($1, 3, 0, $3, 80000000, 'bc1new', NOW()::timestamp),
+             ($1, 4, 0, $2, 50000000, 'bc1old', NOW()::timestamp)",
+        &[
+            &fed,
+            &old_txid.to_byte_array().to_vec(),
+            &new_txid.to_byte_array().to_vec(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let row = conn
+        .query_one(
+            "SELECT txid, utxo_value_msat, address
+             FROM (
+                 SELECT DISTINCT ON (txid)
+                        txid, session_index, item_index, utxo_value_msat, address
+                 FROM fmo_walletv2.wallet_utxos
+                 WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+                 ORDER BY txid, session_index ASC, item_index ASC
+             ) firsts
+             ORDER BY session_index DESC, item_index DESC
+             LIMIT 1",
+            &[&fed],
+        )
+        .await
+        .unwrap();
+
+    let txid_bytes: Vec<u8> = row.get("txid");
+    assert_eq!(bitcoin::Txid::from_slice(&txid_bytes).unwrap(), new_txid);
+    assert_eq!(row.get::<_, i64>("utxo_value_msat"), 80_000_000);
+    assert_eq!(row.get::<_, String>("address"), "bc1new");
+}

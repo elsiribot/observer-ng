@@ -25,7 +25,7 @@ use fmo_core::module::{
 };
 use fmo_core::query::{query, query_value};
 use postgres_from_row::FromRow;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Observer module for the next-generation fedimint `walletv2` (on-chain)
 /// module: tracks peg-in claims (receives), peg-outs (sends), block count
@@ -331,7 +331,19 @@ async fn resolve_utxo_values(ctx: &ModuleTaskCtx) -> anyhow::Result<u64> {
     let mut updated = 0u64;
     for (txid, resolved) in fetched {
         let (value_msat, address) = match resolved {
-            Ok(v) => v,
+            Ok(Some(v)) => v,
+            // A freshly-signed live transition can be invisible to the explorer
+            // for a few minutes until it propagates/confirms; that's expected,
+            // so log at debug and just retry next cycle. (Historical backfill
+            // txids are all long confirmed, so this only affects live tips.)
+            Ok(None) => {
+                debug!(
+                    "walletv2: txid {} not yet visible on explorer for {}, will retry",
+                    hex_display(&txid),
+                    ctx.federation_id
+                );
+                continue;
+            }
             Err(e) => {
                 warn!(
                     "walletv2: failed to resolve txid {} for {}: {e:?}",
@@ -358,19 +370,27 @@ async fn resolve_utxo_values(ctx: &ModuleTaskCtx) -> anyhow::Result<u64> {
 }
 
 /// Fetches one transaction and returns `(value_msat, address)` of its output
-/// at vout 0 — the new consolidated federation UTXO.
+/// at vout 0 — the new consolidated federation UTXO. Returns `Ok(None)` when
+/// the explorer doesn't know the tx yet (not an error: a just-signed live tx
+/// hasn't propagated/confirmed); `Err` only for genuine transport failures.
 async fn resolve_one(
     client: &esplora_client::AsyncClient,
     txid_bytes: &[u8],
-) -> anyhow::Result<(i64, Option<String>)> {
+) -> anyhow::Result<Option<(i64, Option<String>)>> {
     let txid = Txid::from_slice(txid_bytes).context("invalid stored txid")?;
     let esplora_txid =
         esplora_client::Txid::from_str(&txid.to_string()).context("invalid esplora txid")?;
 
-    let tx = client
-        .get_tx_no_opt(&esplora_txid)
+    // `get_tx` returns `None` (rather than erroring) when the tx is unknown to
+    // the explorer, letting us treat "not yet visible" separately from a
+    // transport error.
+    let Some(tx) = client
+        .get_tx(&esplora_txid)
         .await
-        .context("fetching tx from esplora")?;
+        .context("fetching tx from esplora")?
+    else {
+        return Ok(None);
+    };
 
     let utxo = tx.output.first().context("wallet tx has no outputs")?;
     let value_msat = (utxo.value.to_sat() * 1000) as i64;
@@ -381,7 +401,7 @@ async fn resolve_one(
     .map(|address| address.to_string())
     .ok();
 
-    Ok((value_msat, address))
+    Ok(Some((value_msat, address)))
 }
 
 fn hex_display(bytes: &[u8]) -> String {
@@ -423,6 +443,10 @@ async fn run_verification_loop(ctx: &ModuleTaskCtx) {
 
     let mut interval = tokio::time::interval(VERIFY_POLL_INTERVAL);
     let mut divergence_since: Option<Instant> = None;
+    // Whether we've already emitted the sustained-divergence warning for the
+    // current divergence episode, so we warn once when it crosses the threshold
+    // (and log once when it clears) rather than every poll.
+    let mut warned = false;
 
     loop {
         interval.tick().await;
@@ -450,7 +474,7 @@ async fn run_verification_loop(ctx: &ModuleTaskCtx) {
 
         if (live_msat - derived_msat).abs() > VERIFY_TOLERANCE_MSAT {
             let since = *divergence_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= VERIFY_SUSTAINED_DIVERGENCE {
+            if since.elapsed() >= VERIFY_SUSTAINED_DIVERGENCE && !warned {
                 warn!(
                     federation = %federation_id,
                     live_msat,
@@ -462,9 +486,20 @@ async fn run_verification_loop(ctx: &ModuleTaskCtx) {
                     live_msat - derived_msat,
                     since.elapsed().as_secs(),
                 );
+                warned = true;
             }
         } else {
+            // Back in agreement; note the recovery once if we had warned.
+            if warned {
+                info!(
+                    federation = %federation_id,
+                    live_msat,
+                    "walletv2 derived on-chain balance re-agrees with the live \
+                     federation_wallet",
+                );
+            }
             divergence_since = None;
+            warned = false;
         }
     }
 }
@@ -495,16 +530,43 @@ async fn fetch_live_federation_wallet(
     None
 }
 
+/// `FROM ... ORDER BY ... LIMIT 1` fragment selecting the single latest
+/// RESOLVED consolidated-UTXO row for `$1 = federation_id`, ranking each txid
+/// by its FIRST appearance (min session_index, then min item_index within that
+/// session) and picking the txid whose first appearance is greatest.
+///
+/// Why first-appearance and not any appearance: the walletv2 server re-emits a
+/// `Signatures` CI for every still-unfinalized tx, once per peer, each session
+/// until it finalizes, and within a session those items are ordered by txid
+/// (BTreeMap key order), not creation order. So an older-but-still-pending tx
+/// re-announced in a later session can carry a higher `(session, item)` than
+/// the genuinely newer tx; ranking by first appearance avoids returning its
+/// stale value.
+///
+/// Residual limitation (accepted, transient): two DISTINCT txids first
+/// announced in the SAME session still can't be disambiguated from
+/// `(session, item)` alone (item order there is txid order, not creation
+/// order). Resolves itself once one of them finalizes.
+const LATEST_RESOLVED_UTXO_FROM: &str = "
+    FROM (
+        SELECT DISTINCT ON (txid)
+               txid, session_index, item_index, utxo_value_msat, address
+        FROM fmo_walletv2.wallet_utxos
+        WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+        ORDER BY txid, session_index ASC, item_index ASC
+    ) firsts
+    ORDER BY session_index DESC, item_index DESC
+    LIMIT 1";
+
 /// The value (msat) of our latest RESOLVED consolidated UTXO, or `None` if the
 /// resolver hasn't produced one yet.
 async fn latest_resolved_value_msat(ctx: &ModuleTaskCtx) -> anyhow::Result<Option<i64>> {
     let conn = ctx.pool.get().await?;
     query_value::<Option<i64>>(
         &conn,
-        "SELECT (SELECT utxo_value_msat FROM fmo_walletv2.wallet_utxos
-                 WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
-                 ORDER BY session_index DESC, item_index DESC
-                 LIMIT 1)",
+        // Wrapped in a scalar subselect so exactly one row (NULL when none) is
+        // returned, keeping `query_value` happy.
+        &format!("SELECT (SELECT utxo_value_msat {LATEST_RESOLVED_UTXO_FROM})"),
         &[&ctx.federation_id.consensus_encode_to_vec()],
     )
     .await
@@ -534,11 +596,9 @@ async fn federation_utxos(
 
     let latest = query::<WalletUtxoRaw>(
         &state.pool.get().await?,
-        // language=postgresql
-        "SELECT txid, utxo_value_msat, address FROM fmo_walletv2.wallet_utxos
-         WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
-         ORDER BY session_index DESC, item_index DESC
-         LIMIT 1",
+        // Latest resolved UTXO ranked by first appearance (see
+        // `LATEST_RESOLVED_UTXO_FROM`).
+        &format!("SELECT txid, utxo_value_msat, address {LATEST_RESOLVED_UTXO_FROM}"),
         &[&federation_id.consensus_encode_to_vec()],
     )
     .await?;
