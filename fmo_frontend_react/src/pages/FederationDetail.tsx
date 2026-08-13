@@ -10,6 +10,7 @@ import { SessionsTab } from '../components/explorer/SessionsTab';
 import { ConsensusTab } from '../components/explorer/ConsensusTab';
 import { ExplorerSearch } from '../components/explorer/ExplorerSearch';
 import { GatewaysTab } from '../components/GatewaysTab';
+import { GuardianTimeline } from '../components/GuardianTimeline';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
@@ -81,6 +82,7 @@ export function FederationDetail() {
   const [movingAverageWindow, setMovingAverageWindow] = useState<number>(0); // 0 = off, 7 = 7-day, 30 = 30-day
   const [useLogScale, setUseLogScale] = useState(false);
   const [guardianHealth, setGuardianHealth] = useState<Record<string, GuardianHealth>>({});
+  const [showTimeline, setShowTimeline] = useState(false);
   
   // Check if at least one guardian is online
   const hasOnlineGuardian = useMemo(() => {
@@ -340,14 +342,30 @@ export function FederationDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
         {/* Guardians Panel */}
         <div className="lg:col-span-2 bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
-          <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white mb-3 sm:mb-4">
-            Guardians
-            {config && (
-              <span className="ml-2 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
-                {config.guardians.length} of {config.guardians.length} Federation
-              </span>
+          <div className="flex items-start justify-between gap-3 mb-3 sm:mb-4">
+            <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
+              Guardians
+              {config && (
+                <span className="ml-2 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
+                  {config.guardians.length} of {config.guardians.length} Federation
+                </span>
+              )}
+            </h2>
+            {config && config.guardians.length > 0 && (
+              <button
+                onClick={() => setShowTimeline((v) => !v)}
+                aria-expanded={showTimeline}
+                className="shrink-0 text-xs sm:text-sm text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+              >
+                {showTimeline ? 'Hide uptime history' : 'Uptime history'}
+              </button>
             )}
-          </h2>
+          </div>
+          {showTimeline && id && (
+            <div className="mb-4 sm:mb-6 pb-4 sm:pb-6 border-b border-gray-200 dark:border-gray-700">
+              <GuardianTimeline federationId={id} />
+            </div>
+          )}
           {config ? (
             <div className="space-y-3 sm:space-y-4">
               {config.guardians.map((guardian) => {

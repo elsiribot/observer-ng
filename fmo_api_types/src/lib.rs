@@ -75,6 +75,51 @@ pub enum FederationHealth {
     Offline,
 }
 
+/// A half-open time interval `[start, end)` in unix epoch seconds. Used for
+/// both per-guardian offline runs and federation-wide inoperable runs in the
+/// guardian outage timeline.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TimeInterval {
+    /// Interval start, unix epoch seconds (inclusive).
+    pub start: i64,
+    /// Interval end, unix epoch seconds (exclusive). For an outage still
+    /// ongoing at `window_end` this equals `window_end`.
+    pub end: i64,
+}
+
+/// One guardian's lane in the outage timeline: its display name plus the
+/// maximal runs during which it was observed offline within the window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianLane {
+    pub guardian_id: u16,
+    pub name: String,
+    /// Maximal runs where the guardian was offline (its `guardian_health`
+    /// samples had a NULL `status`), ordered by `start`. Empty when the
+    /// guardian was online for the whole window (or had no samples).
+    pub offline_intervals: Vec<TimeInterval>,
+}
+
+/// Guardian outage timeline for a federation over a time window: one lane per
+/// guardian plus the windows during which the federation was inoperable
+/// (fewer than `threshold` guardians online, so consensus could not be
+/// reached).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianTimeline {
+    /// Window start, unix epoch seconds.
+    pub window_start: i64,
+    /// Window end, unix epoch seconds (the query time / "now").
+    pub window_end: i64,
+    /// Total number of guardians in the federation (from its config).
+    pub num_guardians: usize,
+    /// Consensus threshold: `NumPeers::from(num_guardians).threshold()`. The
+    /// federation is inoperable when fewer than this many guardians are online.
+    pub threshold: usize,
+    pub guardians: Vec<GuardianLane>,
+    /// Maximal runs where the online guardian count dropped below `threshold`,
+    /// i.e. the federation could not reach consensus, ordered by `start`.
+    pub inoperable_intervals: Vec<TimeInterval>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoncesRequest {
     pub nonces: Vec<String>,
