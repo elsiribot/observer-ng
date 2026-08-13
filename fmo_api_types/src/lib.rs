@@ -19,6 +19,13 @@ pub struct FederationSummary {
     pub invite: String,
     pub nostr_votes: FederationRating,
     pub health: FederationHealth,
+    /// All-time transaction volume (summed input amounts), from the
+    /// `federation_tx_daily` matview. `Amount::ZERO` for federations with no
+    /// rows yet.
+    pub total_volume: Amount,
+    /// All-time fedimint-transaction count, from the `federation_tx_daily`
+    /// matview. `0` for federations with no rows yet.
+    pub total_tx_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
