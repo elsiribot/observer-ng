@@ -70,6 +70,19 @@ export interface ConsensusPageParams {
   limit?: number;
 }
 
+// Which Lightning module a gateway was registered with. LNv1 entries are rich
+// (node key, alias, vetting, activity/uptime); LNv2 entries are thin (just the
+// gateway's API URL as `gateway_id`/`api_endpoint`, plus first/last seen).
+export type GatewayModule = 'LNv1' | 'LNv2';
+
+// Gateways from both Lightning modules, kept separate so the UI can tag them
+// and so an empty state only shows when *both* are empty. A federation may run
+// only one of the modules, so either list may be empty.
+export interface FederationGateways {
+  v1: GatewayInfo[];
+  v2: GatewayInfo[];
+}
+
 export const api = {
   getTotals: () => request<FedimintTotals>('/federations/totals'),
 
@@ -111,13 +124,25 @@ export const api = {
   getUserTransaction: (federationId: string, userTxKey: string) =>
     request<UserTransaction>(`/federations/${federationId}/user-transactions/${userTxKey}`),
 
-  // Lightning gateways registered with the federation, with activity/uptime
-  // metrics over the given window (1h | 24h | 7d | 30d | 90d; backend default
-  // 7d).
-  getGateways: (federationId: string, window: string = '7d') =>
-    request<GatewayInfo[]>(
-      `/federations/${federationId}/gateways${toQueryString({ window })}`
-    ),
+  // Lightning gateways registered with the federation, fetched from BOTH
+  // Lightning modules: LNv1 (`/modules/ln/gateways`, rich metrics over the
+  // given window: 1h | 24h | 7d | 30d | 90d, backend default 7d) and LNv2
+  // (`/modules/lnv2/gateways`, thin — URL + first/last seen, ignores `window`).
+  // Each endpoint is fetched independently and a failing/absent module (e.g. a
+  // 404 when the federation doesn't run that module) is treated as an empty
+  // list rather than failing the whole tab.
+  async getGateways(federationId: string, window: string = '7d'): Promise<FederationGateways> {
+    const qs = toQueryString({ window });
+    const [v1, v2] = await Promise.all([
+      request<GatewayInfo[]>(`/federations/${federationId}/modules/ln/gateways${qs}`).catch(
+        () => [] as GatewayInfo[]
+      ),
+      request<GatewayInfo[]>(`/federations/${federationId}/modules/lnv2/gateways${qs}`).catch(
+        () => [] as GatewayInfo[]
+      ),
+    ]);
+    return { v1, v2 };
+  },
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited
