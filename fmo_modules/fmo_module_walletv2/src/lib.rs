@@ -3,13 +3,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use axum::extract::{Path, State};
+use axum::routing::get;
+use axum::{Json, Router};
 use bitcoin::hashes::Hash;
-use bitcoin::Txid;
+use bitcoin::{Address, OutPoint, Txid};
+use fedimint_core::config::FederationId;
 use fedimint_core::core::{Decoder, DynInput, DynModuleConsensusItem, DynOutput, ModuleKind};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_core::Amount;
 use fedimint_walletv2_common::{WalletCommonInit, WalletConsensusItem, WalletInput, WalletOutput};
+use fmo_api_types::FederationUtxo;
+use fmo_core::api::ModuleApiState;
 use fmo_core::module::{
     CiMeta, ItemMeta, Migration, ModuleTaskCtx, ObserverModule, ProcessCtx, ProcessedItem,
 };
@@ -245,6 +251,10 @@ impl ObserverModule for WalletV2Observer {
             tokio::time::sleep(resolver_idle_sleep()).await;
         }
     }
+
+    fn api_router(&self) -> Option<Router<ModuleApiState>> {
+        Some(Router::new().route("/utxos", get(get_federation_utxos)))
+    }
 }
 
 /// One resolver cycle: fetch up to `RESOLVE_BATCH_SIZE` distinct still-
@@ -350,4 +360,59 @@ async fn resolve_one(
 
 fn hex_display(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The federation's current on-chain UTXO(s). walletv2 keeps everything in a
+/// single consolidated UTXO, so this returns at most one entry (the latest
+/// resolved transition). Shape matches the v1 wallet `/utxos` endpoint so the
+/// frontend can render it the same way.
+async fn get_federation_utxos(
+    Path(federation_id): Path<FederationId>,
+    State(state): State<ModuleApiState>,
+) -> fmo_core::error::Result<Json<Vec<FederationUtxo>>> {
+    Ok(Json(federation_utxos(&state, federation_id).await?))
+}
+
+async fn federation_utxos(
+    state: &ModuleApiState,
+    federation_id: FederationId,
+) -> anyhow::Result<Vec<FederationUtxo>> {
+    #[derive(Debug, FromRow)]
+    struct WalletUtxoRaw {
+        txid: Vec<u8>,
+        utxo_value_msat: i64,
+        address: Option<String>,
+    }
+
+    let latest = query::<WalletUtxoRaw>(
+        &state.pool.get().await?,
+        // language=postgresql
+        "SELECT txid, utxo_value_msat, address FROM fmo_walletv2.wallet_utxos
+         WHERE federation_id = $1 AND utxo_value_msat IS NOT NULL
+         ORDER BY session_index DESC, item_index DESC
+         LIMIT 1",
+        &[&federation_id.consensus_encode_to_vec()],
+    )
+    .await?;
+
+    latest
+        .into_iter()
+        // The consolidated UTXO always has a standard P2WSH address, so
+        // `address` is populated on resolution; skip the (unexpected) NULL
+        // case rather than fabricate an address.
+        .filter_map(|utxo| {
+            let address = utxo.address?;
+            Some((utxo.txid, utxo.utxo_value_msat, address))
+        })
+        .map(|(txid_bytes, value_msat, address)| {
+            Result::<_, anyhow::Error>::Ok(FederationUtxo {
+                address: Address::<bitcoin::address::NetworkUnchecked>::from_str(&address)?,
+                out_point: OutPoint {
+                    txid: Txid::from_slice(&txid_bytes)?,
+                    vout: 0,
+                },
+                amount: Amount::from_msats(value_msat.try_into()?),
+            })
+        })
+        .collect()
 }

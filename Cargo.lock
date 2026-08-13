@@ -2397,6 +2397,7 @@ dependencies = [
  "esplora-client 0.10.0",
  "fedimint-core",
  "fedimint-walletv2-common",
+ "fmo_api_types",
  "fmo_core",
  "futures",
  "postgres-from-row",

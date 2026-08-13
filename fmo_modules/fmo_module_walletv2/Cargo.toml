@@ -14,6 +14,7 @@ esplora-client = { version = "0.10.0", default-features = false, features = [
 ] }
 fedimint-core = { workspace = true }
 fedimint-walletv2-common = { workspace = true }
+fmo_api_types = { path = "../../fmo_api_types" }
 fmo_core = { path = "../../fmo_core" }
 futures = "0.3.30"
 postgres-from-row = "0.5.2"
