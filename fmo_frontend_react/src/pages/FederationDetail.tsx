@@ -380,6 +380,18 @@ export function FederationDetail() {
                           <Badge level={isOnline ? 'success' : 'error'}>
                             {isOnline ? 'Online' : 'Offline'}
                           </Badge>
+                          <Badge
+                            level={health.avg_uptime < 99 ? 'warning' : 'info'}
+                            tooltip="Average uptime over the last 30 days"
+                          >
+                            Uptime {health.avg_uptime.toFixed(1)}%
+                          </Badge>
+                          <Badge
+                            level="info"
+                            tooltip="Average response latency over the last 30 days"
+                          >
+                            {Math.round(health.avg_latency)} ms
+                          </Badge>
                           {isOnline && (
                             <>
                               <Badge
