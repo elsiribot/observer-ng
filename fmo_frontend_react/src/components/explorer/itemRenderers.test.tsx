@@ -26,6 +26,9 @@ const baseItem: SessionItem = {
   direction: null,
   details: null,
   estimated_time: null,
+  time_lower: null,
+  time_upper: null,
+  time_source: null,
   role: null,
 };
 

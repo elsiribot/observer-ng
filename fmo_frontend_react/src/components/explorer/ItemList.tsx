@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { SessionItem } from '../../types/api';
-import { formatTimestamp, timeAgo } from '../../utils/format';
+import { formatEstimatedTime, timeAgo } from '../../utils/format';
 import { Alert } from '../Alert';
 import { itemLabel, renderItem } from './itemRenderers';
 
@@ -66,6 +66,7 @@ export function ItemList({
           const startsNewSession =
             scope === 'consensus' &&
             (idx === 0 || item.session_index !== items[idx - 1].session_index);
+          const estimatedTime = startsNewSession ? formatEstimatedTime(item) : null;
           return (
             <div key={`${item.session_index}-${item.item_index}`}>
               {startsNewSession && (
@@ -78,7 +79,9 @@ export function ItemList({
                     {item.estimated_time !== null && (
                       <>
                         {' · '}
-                        {formatTimestamp(item.estimated_time)}{' '}
+                        <span title={estimatedTime?.title ?? undefined}>
+                          {estimatedTime?.text}
+                        </span>{' '}
                         <span className="text-gray-300 dark:text-gray-600">
                           ({timeAgo(item.estimated_time)})
                         </span>

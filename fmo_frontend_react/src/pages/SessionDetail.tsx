@@ -8,7 +8,8 @@ import { api } from '../services/api';
 import type { SessionItem } from '../types/api';
 import { ItemList } from '../components/explorer/ItemList';
 import { Alert } from '../components/Alert';
-import { formatNumber, formatTimestamp } from '../utils/format';
+import { formatNumber, formatEstimatedTime } from '../utils/format';
+import type { SessionSummary } from '../types/api';
 
 // Summarizes a session's item list into a compact, deterministically ordered
 // breakdown: a `transactions` entry first (if any), then one entry per
@@ -50,8 +51,9 @@ export function SessionDetail() {
   // The session's estimated time isn't part of the item list response, so we
   // derive it from the one-row keyset page that starts just after this
   // session (session_index + 1, limit 1) — the same endpoint the Sessions
-  // tab uses.
-  const [estimatedTime, setEstimatedTime] = useState<number | null>(null);
+  // tab uses. We keep the whole summary so its time interval fields
+  // (`time_lower`/`time_upper`/`time_source`) are available for the spread.
+  const [sessionSummary, setSessionSummary] = useState<SessionSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,17 +65,15 @@ export function SessionDetail() {
     }
     setLoading(true);
     setError(null);
-    setEstimatedTime(null);
+    setSessionSummary(null);
     Promise.all([
       api.getSessionItems(id, sessionIndex),
       api.getSessionPage(id, sessionIndex + 1, 1),
     ])
       .then(([sessionItems, page]) => {
         setItems(sessionItems);
-        setEstimatedTime(
-          page.length > 0 && page[0].session_index === sessionIndex
-            ? page[0].estimated_time
-            : null
+        setSessionSummary(
+          page.length > 0 && page[0].session_index === sessionIndex ? page[0] : null
         );
       })
       .catch((err: unknown) => {
@@ -83,6 +83,14 @@ export function SessionDetail() {
   }, [id, sessionIndex]);
 
   const breakdown = sessionItemBreakdown(items);
+  const estimatedTime = formatEstimatedTime(
+    sessionSummary ?? {
+      estimated_time: null,
+      time_lower: null,
+      time_upper: null,
+      time_source: null,
+    }
+  );
 
   return (
     <div className="py-4 sm:py-8 px-4 sm:px-0">
@@ -121,7 +129,7 @@ export function SessionDetail() {
       )}
 
       <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6 sm:mb-8">
-        {formatTimestamp(estimatedTime)}
+        <span title={estimatedTime.title ?? undefined}>{estimatedTime.text}</span>
         {breakdown.length > 0 &&
           ' · ' + breakdown.map((b) => `${formatNumber(b.count)} ${b.label}`).join(' · ')}
       </div>

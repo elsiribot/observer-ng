@@ -28,6 +28,9 @@ function makeSession(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
     session_index: 100,
     estimated_time: 1_700_000_000,
+    time_lower: null,
+    time_upper: null,
+    time_source: null,
     tx_count: 3,
     items_by_kind: { ln: 2, wallet: 1, ignored_not_a_number: { nested: true } },
     ...overrides,

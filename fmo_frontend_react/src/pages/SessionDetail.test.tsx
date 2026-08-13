@@ -33,6 +33,9 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     direction: null,
     details: null,
     estimated_time: 1_700_000_000,
+    time_lower: null,
+    time_upper: null,
+    time_source: null,
     role: null,
     ...overrides,
   };
@@ -42,6 +45,9 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
     session_index: 5,
     estimated_time: 1_700_000_000,
+    time_lower: null,
+    time_upper: null,
+    time_source: null,
     tx_count: 0,
     items_by_kind: {},
     ...overrides,

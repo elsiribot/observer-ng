@@ -57,7 +57,15 @@ export interface NavItem {
 /// wall-clock time.
 export interface SessionSummary {
   session_index: number;
+  /** Point-estimate wall-clock time (epoch seconds); prefer the interval
+   * fields below. */
   estimated_time: number | null;
+  /** Lower bound of the estimated-time interval (epoch seconds). */
+  time_lower: number | null;
+  /** Upper bound (epoch seconds), null when unbounded. */
+  time_upper: number | null;
+  /** "voted" | "interpolated" | null (sessions never carry "observed"). */
+  time_source: string | null;
   tx_count: number;
   items_by_kind: Record<string, unknown>;
 }
@@ -80,9 +88,21 @@ export interface SessionItem {
   /** "in" | "out" | "internal", null alongside `user_tx_kind`. */
   direction: string | null;
   details: Record<string, unknown> | null;
-  /** The item's session's estimated wall-clock time (unix epoch seconds),
-   * or null if the session has no time vote yet. */
+  /** Best point-estimate wall-clock time (unix epoch seconds): exact observed
+   * time if seen live, else the midpoint of the vote-based interval (or its
+   * lower bound if unbounded). Null if no time info. Prefer the interval
+   * fields below. */
   estimated_time: number | null;
+  /** Lower bound of the estimated-time interval (epoch seconds); equals
+   * `time_upper` for an exactly-known time. */
+  time_lower: number | null;
+  /** Upper bound of the estimated-time interval (epoch seconds), null when
+   * unbounded (session more recent than the last known vote). */
+  time_upper: number | null;
+  /** How the time was derived: "observed" (exact, seen live), "voted"
+   * (direct vote, zero-width), or "interpolated" (forward-filled, has a
+   * spread); null when no time info. */
+  time_source: string | null;
   /** The tx's role in its gold user transaction: offer/fund/claim/cancel/
    * refund/self; null for CIs and unclassified txs. */
   role: string | null;

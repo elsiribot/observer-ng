@@ -25,6 +25,9 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     direction: null,
     details: null,
     estimated_time: null,
+    time_lower: null,
+    time_upper: null,
+    time_source: null,
     role: null,
     ...overrides,
   };
@@ -76,11 +79,41 @@ describe('ItemList', () => {
   });
 
   it('shows the estimated time and age on the divider when the session has one', () => {
+    const t = Math.floor(Date.now() / 1000) - 120;
     renderList(
-      [makeItem({ session_index: 12, item_index: 0, estimated_time: Math.floor(Date.now() / 1000) - 120 })],
+      [
+        makeItem({
+          session_index: 12,
+          item_index: 0,
+          estimated_time: t,
+          time_lower: t,
+          time_upper: t,
+          time_source: 'observed',
+        }),
+      ],
       'consensus'
     );
     const divider = screen.getByLabelText('Session 12');
     expect(divider.textContent).toMatch(/Session 12 · .+\(2m ago\)/);
+  });
+
+  it('shows an interpolated spread on the divider', () => {
+    const lower = 1_700_000_000;
+    const upper = lower + 480; // ±4m spread
+    renderList(
+      [
+        makeItem({
+          session_index: 12,
+          item_index: 0,
+          estimated_time: (lower + upper) / 2,
+          time_lower: lower,
+          time_upper: upper,
+          time_source: 'interpolated',
+        }),
+      ],
+      'consensus'
+    );
+    const divider = screen.getByLabelText('Session 12');
+    expect(divider.textContent).toMatch(/≈ .+ ·±4m/);
   });
 });
