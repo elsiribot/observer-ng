@@ -58,6 +58,56 @@ export interface NavItem {
   active: boolean;
 }
 
+/// Real Lightning activity metrics for a gateway over a time window,
+/// computed from the modular contract tables. Counts are event counts;
+/// `total_volume_msat` is the funded outgoing volume in millisatoshis.
+export interface GatewayActivityMetrics {
+  fund_count: number;
+  settle_count: number;
+  cancel_count: number;
+  total_volume_msat: number;
+}
+
+/// Uptime metrics for a gateway over a time window, computed from periodic
+/// poll snapshots. `uptime_pct` is 0-100.
+export interface GatewayUptimeMetrics {
+  sample_count: number;
+  seen_samples: number;
+  online_minutes: number;
+  offline_minutes: number;
+  uptime_pct: number;
+}
+
+/// A Lightning gateway registered with a federation, plus optional activity
+/// and uptime metrics over the requested window. Optional fields mirror the
+/// backend's `skip_serializing_if = Option::is_none`: absent keys deserialize
+/// to `undefined`.
+export interface GatewayInfo {
+  /** Gateway's public key (hex-encoded). */
+  gateway_id: string;
+  /** LN node public key (hex-encoded). */
+  node_pub_key: string;
+  lightning_alias: string;
+  /** URL of the gateway's public API. */
+  api_endpoint: string;
+  /** Whether the federation has vetted this gateway. */
+  vetted: boolean;
+  /** Full raw announcement, useful for forwards-compatible client usage. */
+  raw?: unknown;
+  /** First time this gateway was seen by the observer (RFC3339 timestamp). */
+  first_seen?: string;
+  /** Most recent time this gateway was seen by the observer (RFC3339). */
+  last_seen?: string;
+  /** Real LN activity metrics over the last 7 days. */
+  activity_7d?: GatewayActivityMetrics;
+  /** Real LN activity metrics over the requested API window. */
+  activity_window?: GatewayActivityMetrics;
+  /** Uptime metrics over the requested window. */
+  uptime_window?: GatewayUptimeMetrics;
+  /** The window label used for `activity_window`/`uptime_window`, e.g. "7d". */
+  metrics_window?: string;
+}
+
 /// One row of the session list: precomputed counts plus the estimated
 /// wall-clock time.
 export interface SessionSummary {

@@ -9,6 +9,7 @@ import { Copyable } from '../components/Copyable';
 import { SessionsTab } from '../components/explorer/SessionsTab';
 import { ConsensusTab } from '../components/explorer/ConsensusTab';
 import { ExplorerSearch } from '../components/explorer/ExplorerSearch';
+import { GatewaysTab } from '../components/GatewaysTab';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
@@ -67,7 +68,7 @@ export function FederationDetail() {
   const [utxos, setUtxos] = useState<UTXO[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'activity' | 'sessions' | 'consensus' | 'utxos' | 'config'>('activity');
+  const [activeTab, setActiveTab] = useState<'activity' | 'sessions' | 'consensus' | 'utxos' | 'gateways' | 'config'>('activity');
   const [utxosLoading, setUtxosLoading] = useState(false);
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState('');
@@ -569,6 +570,16 @@ export function FederationDetail() {
               UTXOs
             </button>
             <button
+              onClick={() => setActiveTab('gateways')}
+              className={`border-b-2 py-3 sm:py-4 px-1 text-xs sm:text-sm font-medium whitespace-nowrap ${
+                activeTab === 'gateways'
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+              }`}
+            >
+              Gateways
+            </button>
+            <button
               onClick={() => setActiveTab('config')}
               className={`border-b-2 py-3 sm:py-4 px-1 text-xs sm:text-sm font-medium whitespace-nowrap ${
                 activeTab === 'config'
@@ -757,6 +768,10 @@ export function FederationDetail() {
                 </div>
               </div>
             </>
+          )}
+
+          {activeTab === 'gateways' && id && (
+            <GatewaysTab federationId={id} />
           )}
 
           {activeTab === 'config' && (
