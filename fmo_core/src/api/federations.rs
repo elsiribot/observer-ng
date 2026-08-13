@@ -407,6 +407,13 @@ impl FederationObserver {
             .collect())
     }
 
+    /// On-chain assets held by the federation: peg-in deposits (wallet inputs)
+    /// minus peg-out withdrawals (wallet outputs). Covers BOTH the v1 `wallet`
+    /// and v2 `walletv2` modules — walletv2-only federations would otherwise
+    /// net to 0. The v2 amounts follow the same input=deposit(+)/output=
+    /// withdrawal(-) convention; note walletv2 input amounts are balance-
+    /// inferred (fee-approximate) rather than exact consensus values (walletv2
+    /// tracks no on-chain UTXO set), so this is a close estimate for those.
     pub async fn get_federation_assets(
         &self,
         federation_id: FederationId,
@@ -417,10 +424,10 @@ impl FederationObserver {
         SELECT
             CAST((SELECT COALESCE(SUM(amount_msat), 0)
              FROM transaction_inputs
-             WHERE kind = 'wallet' AND federation_id = $1) -
+             WHERE kind IN ('wallet', 'walletv2') AND federation_id = $1) -
             (SELECT COALESCE(SUM(amount_msat), 0)
              FROM transaction_outputs
-             WHERE kind = 'wallet' AND federation_id = $1) AS BIGINT) AS net_amount_msat
+             WHERE kind IN ('wallet', 'walletv2') AND federation_id = $1) AS BIGINT) AS net_amount_msat
         ",
             &[&federation_id.consensus_encode_to_vec()],
         )
