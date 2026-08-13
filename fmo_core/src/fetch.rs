@@ -67,7 +67,14 @@ pub async fn run_fetcher(
         .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone()))
         .collect();
     let api = DynGlobalApi::new(connectors, peers, None)?;
-    let decoders = ModuleRegistry::fallback_decoders();
+    // `catch_up` only writes structural facts (it never dispatches to modules),
+    // so the empty fallback registry is sufficient there — it never needs to
+    // downcast a module item. The live path is different: `run_live` dispatches
+    // the items it decodes straight to the modules, so it derives the real
+    // per-federation decoders itself (see run_live) rather than accepting a
+    // registry here, which previously let the fallback set leak into the live
+    // path and store NULL amounts for the whole live tail.
+    let catch_up_decoders = ModuleRegistry::fallback_decoders();
 
     info!("Starting session fetcher for {federation_id}");
     let mut next_session = next_session_to_fetch(&pool, federation_id).await?;
@@ -85,7 +92,7 @@ pub async fn run_fetcher(
             next_session = catch_up(
                 &pool,
                 &api,
-                &decoders,
+                &catch_up_decoders,
                 federation_id,
                 &config,
                 next_session,
@@ -104,7 +111,6 @@ pub async fn run_fetcher(
             federation_id,
             &config,
             &api,
-            &decoders,
             watermark_tx,
             next_session,
         )

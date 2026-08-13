@@ -14,7 +14,6 @@ use deadpool_postgres::Pool;
 use fedimint_api_client::api::DynGlobalApi;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::Encodable;
-use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::ApiVersion;
 use fedimint_core::session_outcome::{AcceptedItem, SessionStatus};
 use tokio::sync::watch;
@@ -65,10 +64,17 @@ pub async fn run_live(
     federation_id: FederationId,
     config: &ClientConfig,
     api: &DynGlobalApi,
-    decoders: &ModuleDecoderRegistry,
     wm: &watch::Sender<Watermark>,
     session_index: u64,
 ) -> anyhow::Result<()> {
+    // Decode live session items with the federation's REAL module decoders so
+    // dispatch sees typed items. Derived here from (registry, config) rather
+    // than passed in, so the empty fallback registry can never leak into the
+    // live path — that bug made every live item `DynUnknown`, every module
+    // downcast fail, and amounts/details store NULL for the whole live tail.
+    // `.decoders()` appends a fallback, so genuinely-unknown module kinds still
+    // degrade gracefully.
+    let decoders = registry.decoders(config);
     let mut next_item_index = 0usize;
 
     loop {
@@ -76,7 +82,7 @@ pub async fn run_live(
         // routes to the plain SESSION_STATUS_ENDPOINT consensus request, no
         // signature verification needed for the live/pending path.
         match api
-            .get_session_status(session_index, decoders, ApiVersion::new(0, 0), None)
+            .get_session_status(session_index, &decoders, ApiVersion::new(0, 0), None)
             .await
         {
             Ok(SessionStatus::Initial) => {
