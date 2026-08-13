@@ -1,6 +1,7 @@
 mod common;
 
 use common::{dummy_config, insert_federation, reset_db, test_pool, DB_LOCK};
+use fedimint_core::config::FederationId;
 use fedimint_core::encoding::Encodable;
 use fmo_core::observer::FederationObserver;
 use fmo_core::registry::ModuleRegistry;
@@ -546,4 +547,275 @@ async fn walletv2_assets_rank_latest_utxo_by_first_appearance() {
     // wallet net (10M) + newer-by-first-appearance walletv2 UTXO (80M) = 90M;
     // NOT the re-announced OLD txid (would give 10M + 50M = 60M).
     assert_eq!(assets, fedimint_core::Amount::from_msats(90_000_000));
+}
+
+/// Builds a `ClientConfig` with `n` guardians (peers `0..n`, each named
+/// `peer<i>`) and a single dummy module, deriving its federation id.
+fn multi_guardian_config(n: u16) -> (fedimint_core::config::ClientConfig, FederationId) {
+    use std::collections::BTreeMap;
+
+    use fedimint_core::config::{ClientConfig, ClientModuleConfig, GlobalClientConfig, PeerUrl};
+    use fedimint_core::core::ModuleKind;
+    use fedimint_core::module::{CoreConsensusVersion, ModuleConsensusVersion};
+    use fedimint_core::PeerId;
+    use fedimint_dummy_common::config::DummyClientConfig;
+
+    let api_endpoints = (0..n)
+        .map(|i| {
+            (
+                PeerId::from(i),
+                PeerUrl {
+                    url: format!("wss://guardian-{i}.example.com/")
+                        .parse()
+                        .expect("valid url"),
+                    name: format!("peer{i}"),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let config = ClientConfig {
+        global: GlobalClientConfig {
+            api_endpoints,
+            broadcast_public_keys: None,
+            consensus_version: CoreConsensusVersion::new(2, 0),
+            meta: BTreeMap::new(),
+        },
+        modules: BTreeMap::from([(
+            0,
+            ClientModuleConfig::from_typed(
+                0,
+                ModuleKind::from_static_str("dummy"),
+                ModuleConsensusVersion::new(2, 0),
+                DummyClientConfig,
+            )
+            .expect("valid module config"),
+        )]),
+    };
+    let federation_id = config.global.calculate_federation_id();
+    (config, federation_id)
+}
+
+/// Inserts a `guardian_health` sample. `online = true` writes a non-NULL
+/// `status` (guardian responded); `online = false` writes NULL (offline).
+async fn insert_health_sample(
+    conn: &deadpool_postgres::Object,
+    fed: &[u8],
+    time: chrono::NaiveDateTime,
+    guardian_id: i32,
+    online: bool,
+) {
+    let status: Option<serde_json::Value> = online.then(|| serde_json::json!({}));
+    conn.execute(
+        "INSERT INTO guardian_health (federation_id, time, guardian_id, status, block_height, latency_ms)
+         VALUES ($1, $2, $3, $4, NULL, 10)",
+        &[&fed, &time, &guardian_id, &status],
+    )
+    .await
+    .unwrap();
+}
+
+/// `get_guardian_timeline` derives, from mixed NULL/non-NULL `guardian_health`
+/// samples: (a) per-guardian maximal offline runs, and (b) federation-wide
+/// inoperable runs where the online guardian count drops below the consensus
+/// threshold. A 4-guardian federation has threshold 3, so two simultaneously
+/// offline guardians make it inoperable.
+#[tokio::test]
+async fn guardian_timeline_computes_offline_and_inoperable_intervals() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = multi_guardian_config(4);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // Five polls, 60s apart, ending 6 minutes ago so every row is comfortably
+    // inside the query window and before `window_end` (= now).
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..5)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    for (i, &time) in t.iter().enumerate() {
+        // Guardians 0 and 1: always online.
+        insert_health_sample(&conn, &fed, time, 0, true).await;
+        insert_health_sample(&conn, &fed, time, 1, true).await;
+        // Guardians 2 and 3: offline at t2 and t3, online otherwise.
+        let offline = i == 2 || i == 3;
+        insert_health_sample(&conn, &fed, time, 2, !offline).await;
+        insert_health_sample(&conn, &fed, time, 3, !offline).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let timeline = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+
+    assert_eq!(timeline.num_guardians, 4);
+    assert_eq!(
+        timeline.threshold,
+        fedimint_core::NumPeers::from(4usize).threshold()
+    );
+    assert_eq!(timeline.threshold, 3);
+    assert_eq!(timeline.guardians.len(), 4);
+
+    let epoch = |ndt: chrono::NaiveDateTime| ndt.and_utc().timestamp();
+
+    // Guardians 0 and 1 were never offline.
+    assert!(timeline.guardians[0].offline_intervals.is_empty());
+    assert!(timeline.guardians[1].offline_intervals.is_empty());
+    assert_eq!(timeline.guardians[0].name, "peer0");
+
+    // Guardians 2 and 3 were offline across [t2, t4): from the first NULL
+    // sample (t2) until the next sample that shows them back online (t4).
+    for gid in [2usize, 3usize] {
+        assert_eq!(
+            timeline.guardians[gid].offline_intervals.len(),
+            1,
+            "guardian {gid} should have one offline interval"
+        );
+        let interval = timeline.guardians[gid].offline_intervals[0];
+        assert_eq!(interval.start, epoch(t[2]));
+        assert_eq!(interval.end, epoch(t[4]));
+    }
+
+    // Two of four guardians offline at t2 and t3 => online count 2 < threshold
+    // 3 => inoperable across [t2, t4).
+    assert_eq!(timeline.inoperable_intervals.len(), 1);
+    assert_eq!(timeline.inoperable_intervals[0].start, epoch(t[2]));
+    assert_eq!(timeline.inoperable_intervals[0].end, epoch(t[4]));
+}
+
+/// An outage still ongoing at the end of the window (the guardian's latest
+/// sample is NULL) extends to `window_end` (= now), for both the per-guardian
+/// lane and the federation-wide inoperable run.
+#[tokio::test]
+async fn guardian_timeline_ongoing_outage_extends_to_window_end() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    // n=3 => threshold 3, so a single offline guardian makes the federation
+    // inoperable. All three guardians report every poll (no absent guardians,
+    // which would otherwise count as offline in the inoperable tally).
+    let (config, federation_id) = multi_guardian_config(3);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..4)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    for (i, &time) in t.iter().enumerate() {
+        // Guardian 0: online for two polls, then offline and never recovers.
+        insert_health_sample(&conn, &fed, time, 0, i < 2).await;
+        // Guardians 1 and 2: online throughout.
+        insert_health_sample(&conn, &fed, time, 1, true).await;
+        insert_health_sample(&conn, &fed, time, 2, true).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let before_end = chrono::Utc::now().timestamp();
+    let timeline = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+    let after_end = chrono::Utc::now().timestamp();
+
+    assert_eq!(timeline.threshold, 3);
+
+    // Guardian 0: one ongoing outage starting at t2, ending at window_end (now).
+    assert_eq!(timeline.guardians[0].offline_intervals.len(), 1);
+    let ongoing = timeline.guardians[0].offline_intervals[0];
+    assert_eq!(ongoing.start, t[2].and_utc().timestamp());
+    assert!(ongoing.end >= before_end && ongoing.end <= after_end);
+    assert_eq!(ongoing.end, timeline.window_end);
+
+    // Guardians 1 and 2 never went offline.
+    assert!(timeline.guardians[1].offline_intervals.is_empty());
+    assert!(timeline.guardians[2].offline_intervals.is_empty());
+
+    // One guardian offline (of three) => online 2 < threshold 3 => inoperable
+    // from t2, ongoing to window_end.
+    assert_eq!(timeline.inoperable_intervals.len(), 1);
+    assert_eq!(
+        timeline.inoperable_intervals[0].start,
+        t[2].and_utc().timestamp()
+    );
+    assert_eq!(timeline.inoperable_intervals[0].end, timeline.window_end);
+}
+
+/// A guardian that never produced any `guardian_health` sample in the window
+/// gets an empty lane (no fabricated full-window outage), and every configured
+/// guardian still appears as a lane.
+#[tokio::test]
+async fn guardian_timeline_guardian_without_samples_has_empty_lane() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = multi_guardian_config(2);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let conn = pool.get().await.unwrap();
+    // Only guardian 0 reports (always online); guardian 1 never appears.
+    for i in 0..4 {
+        insert_health_sample(&conn, &fed, base + chrono::Duration::minutes(i), 0, true).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let timeline = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+
+    // Both guardians present as lanes; neither has an offline interval (the
+    // reporting one was online, the silent one has no data to infer from).
+    assert_eq!(timeline.guardians.len(), 2);
+    assert_eq!(timeline.guardians[1].guardian_id, 1);
+    assert!(timeline.guardians[0].offline_intervals.is_empty());
+    assert!(timeline.guardians[1].offline_intervals.is_empty());
 }

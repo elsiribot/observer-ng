@@ -8,7 +8,10 @@ use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::endpoint_constants::STATUS_ENDPOINT;
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::{NumPeers, PeerId};
-use fmo_api_types::{FederationHealth, GuardianHealth, GuardianHealthLatest};
+use fmo_api_types::{
+    FederationHealth, GuardianHealth, GuardianHealthLatest, GuardianLane, GuardianTimeline,
+    TimeInterval,
+};
 use futures::future::join_all;
 use postgres_from_row::FromRow;
 
@@ -289,6 +292,221 @@ impl FederationObserver {
                 }
             })
             .collect()
+    }
+
+    /// Builds the guardian outage timeline for a federation over the last
+    /// `window`: one lane per guardian listing the maximal runs it was offline,
+    /// plus the windows where the federation was inoperable (online guardian
+    /// count below the consensus threshold).
+    ///
+    /// # Offline rule
+    /// The guardian poller writes one `guardian_health` row per guardian per
+    /// ~60s poll; a NULL `status` means the guardian did not respond (offline),
+    /// a non-NULL `status` means it responded (online). A guardian is
+    /// considered offline from its first NULL sample until the next sample that
+    /// shows it back online (non-NULL `status`), or until `window_end` if it is
+    /// still offline at the end of the window (an ongoing outage). We carry the
+    /// last observed state forward across sampling gaps: if the observer itself
+    /// was down for a while, whatever state we last saw is assumed to hold
+    /// until the next sample proves otherwise (so an outage is shown as
+    /// continuous until an online sample proves recovery). Monitoring gaps are
+    /// deliberately NOT independently inferred as offline — with no data we do
+    /// not fabricate an outage, we only extend the last known state. A guardian
+    /// with no samples at all in the window therefore has zero intervals.
+    ///
+    /// # Inoperable rule
+    /// Each poll timestamp is shared by all guardians (the poller stamps one
+    /// time per poll), so we count, per timestamp, how many guardians responded
+    /// (non-NULL `status`). The federation is inoperable across `[poll, next
+    /// poll)` whenever that count is `< threshold`, coalesced into maximal
+    /// runs, with an ongoing sub-threshold state extended to `window_end`.
+    ///
+    /// Both interval sets are computed with gap-and-islands SQL over
+    /// `guardian_health` rather than shipping raw samples to Rust; guardians
+    /// are almost always online so the resulting interval set is small.
+    pub async fn get_guardian_timeline(
+        &self,
+        federation_id: FederationId,
+        window: chrono::Duration,
+    ) -> anyhow::Result<GuardianTimeline> {
+        let federation = self
+            .get_federation(federation_id)
+            .await
+            .context("Unknown federation")?
+            .context("Unknown federation")?;
+
+        // Guardian display names + count come from the federation config, the
+        // same source as the guardian panel (`api_endpoints[peer].name`).
+        let names: BTreeMap<u16, String> = federation
+            .config
+            .global
+            .api_endpoints
+            .iter()
+            .map(|(peer, peer_url)| (peer.to_usize() as u16, peer_url.name.clone()))
+            .collect();
+        let num_guardians = names.len();
+        let threshold = NumPeers::from(num_guardians).threshold();
+
+        let window_end = chrono::Utc::now().naive_utc();
+        let window_start = window_end - window;
+        let fed = federation_id.consensus_encode_to_vec();
+
+        let conn = self.connection().await?;
+
+        // --- per-guardian offline intervals (gap-and-islands) ---
+        #[derive(FromRow)]
+        struct OfflineIntervalRow {
+            guardian_id: i32,
+            start_time: chrono::NaiveDateTime,
+            end_time: chrono::NaiveDateTime,
+        }
+
+        let offline_rows = query::<OfflineIntervalRow>(
+            &conn,
+            // language=postgresql
+            "WITH samples AS (
+                 SELECT guardian_id, time, (status IS NOT NULL) AS online
+                 FROM guardian_health
+                 WHERE federation_id = $1 AND time >= $2 AND time <= $3
+             ),
+             flagged AS (
+                 SELECT guardian_id, time,
+                        LAG(online) OVER w AS prev_online,
+                        LAG(time) OVER w AS prev_time
+                 FROM samples
+                 WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
+             ),
+             -- An offline segment spans [prev_time, time) whenever the previous
+             -- sample showed the guardian offline. A trailing segment extends a
+             -- still-offline last sample to window_end.
+             segments AS (
+                 SELECT guardian_id, prev_time AS seg_start, time AS seg_end
+                 FROM flagged
+                 WHERE prev_time IS NOT NULL AND prev_online = false
+                 UNION ALL
+                 SELECT guardian_id, time AS seg_start, $3::timestamp AS seg_end
+                 FROM (
+                     SELECT DISTINCT ON (guardian_id) guardian_id, time, online
+                     FROM samples
+                     ORDER BY guardian_id, time DESC
+                 ) last_sample
+                 WHERE online = false
+             ),
+             -- Coalesce touching/overlapping segments into maximal runs.
+             grouped AS (
+                 SELECT guardian_id, seg_start, seg_end,
+                        SUM(new_grp) OVER (PARTITION BY guardian_id ORDER BY seg_start) AS grp
+                 FROM (
+                     SELECT guardian_id, seg_start, seg_end,
+                            CASE WHEN LAG(seg_end) OVER (PARTITION BY guardian_id ORDER BY seg_start)
+                                      >= seg_start
+                                 THEN 0 ELSE 1 END AS new_grp
+                     FROM segments
+                 ) s
+             )
+             SELECT guardian_id,
+                    MIN(seg_start) AS start_time,
+                    MAX(seg_end) AS end_time
+             FROM grouped
+             GROUP BY guardian_id, grp
+             ORDER BY guardian_id, start_time",
+            &[&fed, &window_start, &window_end],
+        )
+        .await?;
+
+        // Group offline intervals by guardian id.
+        let mut intervals_by_guardian: BTreeMap<u16, Vec<TimeInterval>> = BTreeMap::new();
+        for row in offline_rows {
+            intervals_by_guardian
+                .entry(row.guardian_id as u16)
+                .or_default()
+                .push(TimeInterval {
+                    start: row.start_time.and_utc().timestamp(),
+                    end: row.end_time.and_utc().timestamp(),
+                });
+        }
+
+        // One lane per configured guardian, in peer-id order, even if it has no
+        // samples/outages (so the timeline always shows every guardian).
+        let guardians = names
+            .into_iter()
+            .map(|(guardian_id, name)| GuardianLane {
+                guardian_id,
+                name,
+                offline_intervals: intervals_by_guardian
+                    .remove(&guardian_id)
+                    .unwrap_or_default(),
+            })
+            .collect();
+
+        // --- federation-wide inoperable intervals (gap-and-islands) ---
+        #[derive(FromRow)]
+        struct InoperableIntervalRow {
+            start_time: chrono::NaiveDateTime,
+            end_time: chrono::NaiveDateTime,
+        }
+
+        let inoperable_rows = query::<InoperableIntervalRow>(
+            &conn,
+            // language=postgresql
+            "WITH poll_counts AS (
+                 SELECT time,
+                        COUNT(*) FILTER (WHERE status IS NOT NULL) AS online_count
+                 FROM guardian_health
+                 WHERE federation_id = $1 AND time >= $2 AND time <= $3
+                 GROUP BY time
+             ),
+             flagged AS (
+                 SELECT time,
+                        LAG(online_count < $4) OVER (ORDER BY time) AS prev_inoperable,
+                        LAG(time) OVER (ORDER BY time) AS prev_time
+                 FROM poll_counts
+             ),
+             segments AS (
+                 SELECT prev_time AS seg_start, time AS seg_end
+                 FROM flagged
+                 WHERE prev_time IS NOT NULL AND prev_inoperable = true
+                 UNION ALL
+                 SELECT time AS seg_start, $3::timestamp AS seg_end
+                 FROM (
+                     SELECT time, online_count FROM poll_counts ORDER BY time DESC LIMIT 1
+                 ) last_poll
+                 WHERE online_count < $4
+             ),
+             grouped AS (
+                 SELECT seg_start, seg_end,
+                        SUM(new_grp) OVER (ORDER BY seg_start) AS grp
+                 FROM (
+                     SELECT seg_start, seg_end,
+                            CASE WHEN LAG(seg_end) OVER (ORDER BY seg_start) >= seg_start
+                                 THEN 0 ELSE 1 END AS new_grp
+                     FROM segments
+                 ) s
+             )
+             SELECT MIN(seg_start) AS start_time, MAX(seg_end) AS end_time
+             FROM grouped
+             GROUP BY grp
+             ORDER BY start_time",
+            &[&fed, &window_start, &window_end, &(threshold as i64)],
+        )
+        .await?;
+
+        let inoperable_intervals = inoperable_rows
+            .into_iter()
+            .map(|row| TimeInterval {
+                start: row.start_time.and_utc().timestamp(),
+                end: row.end_time.and_utc().timestamp(),
+            })
+            .collect();
+
+        Ok(GuardianTimeline {
+            window_start: window_start.and_utc().timestamp(),
+            window_end: window_end.and_utc().timestamp(),
+            num_guardians,
+            threshold,
+            guardians,
+            inoperable_intervals,
+        })
     }
 }
 

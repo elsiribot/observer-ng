@@ -39,6 +39,10 @@ pub fn get_federations_routes() -> Router<AppState> {
         .route("/:federation_id/meta", get(get_federation_meta))
         .route("/:federation_id/health", get(get_federation_health))
         .route(
+            "/:federation_id/health/timeline",
+            get(get_federation_health_timeline),
+        )
+        .route(
             "/:federation_id/transactions",
             get(super::transactions::list_transactions),
         )
@@ -148,6 +152,49 @@ async fn get_federation_health(
         .get_guardian_health(federation_id)
         .await?
         .into())
+}
+
+#[derive(Deserialize, Debug)]
+struct TimelineParams {
+    window: Option<String>,
+}
+
+/// Parses a timeline window label into a duration. Supports `Nd` (days) and
+/// `Nh` (hours), e.g. "7d", "30d". Defaults to 30 days when absent; errors on
+/// anything unparseable so a typo surfaces rather than silently defaulting.
+fn parse_timeline_window(window: Option<&str>) -> anyhow::Result<chrono::Duration> {
+    let Some(raw) = window else {
+        return Ok(chrono::Duration::days(30));
+    };
+    let raw = raw.trim();
+    let (value, unit) = raw.split_at(
+        raw.find(|c: char| !c.is_ascii_digit())
+            .context("Invalid window: expected a number followed by 'd' or 'h'")?,
+    );
+    let value: i64 = value
+        .parse()
+        .context("Invalid window: expected a number followed by 'd' or 'h'")?;
+    if !(1..=365).contains(&value) {
+        anyhow::bail!("Invalid window: value must be between 1 and 365");
+    }
+    match unit {
+        "d" => Ok(chrono::Duration::days(value)),
+        "h" => Ok(chrono::Duration::hours(value)),
+        other => anyhow::bail!("Invalid window unit '{other}'. Supported units: d, h"),
+    }
+}
+
+async fn get_federation_health_timeline(
+    Path(federation_id): Path<FederationId>,
+    axum::extract::Query(params): axum::extract::Query<TimelineParams>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl IntoResponse> {
+    let window = parse_timeline_window(params.window.as_deref())?;
+    let timeline = state
+        .observer
+        .get_guardian_timeline(federation_id, window)
+        .await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(timeline)))
 }
 
 async fn get_federation_overview(
@@ -598,7 +645,32 @@ fn last_n_day_iter(now: NaiveDate, days: u32) -> impl Iterator<Item = NaiveDate>
 
 #[cfg(test)]
 mod tests {
-    use super::last_n_day_iter;
+    use super::{last_n_day_iter, parse_timeline_window};
+
+    #[test]
+    fn test_parse_timeline_window() {
+        assert_eq!(
+            parse_timeline_window(None).unwrap(),
+            chrono::Duration::days(30)
+        );
+        assert_eq!(
+            parse_timeline_window(Some("7d")).unwrap(),
+            chrono::Duration::days(7)
+        );
+        assert_eq!(
+            parse_timeline_window(Some("30d")).unwrap(),
+            chrono::Duration::days(30)
+        );
+        assert_eq!(
+            parse_timeline_window(Some("24h")).unwrap(),
+            chrono::Duration::hours(24)
+        );
+        assert!(parse_timeline_window(Some("d")).is_err());
+        assert!(parse_timeline_window(Some("7")).is_err());
+        assert!(parse_timeline_window(Some("7w")).is_err());
+        assert!(parse_timeline_window(Some("0d")).is_err());
+        assert!(parse_timeline_window(Some("banana")).is_err());
+    }
 
     #[test]
     fn test_day_iter() {
