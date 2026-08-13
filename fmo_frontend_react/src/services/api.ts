@@ -2,6 +2,7 @@ import type {
   ConsensusPage,
   FedimintTotals,
   FederationSummary,
+  GatewayInfo,
   SessionItem,
   SessionSummary,
   TxDetail,
@@ -109,6 +110,14 @@ export const api = {
   // Deduplicated gold-layer user transaction plus its member fedimint txs.
   getUserTransaction: (federationId: string, userTxKey: string) =>
     request<UserTransaction>(`/federations/${federationId}/user-transactions/${userTxKey}`),
+
+  // Lightning gateways registered with the federation, with activity/uptime
+  // metrics over the given window (1h | 24h | 7d | 30d | 90d; backend default
+  // 7d).
+  getGateways: (federationId: string, window: string = '7d') =>
+    request<GatewayInfo[]>(
+      `/federations/${federationId}/gateways${toQueryString({ window })}`
+    ),
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited
