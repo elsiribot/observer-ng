@@ -12,6 +12,11 @@ export interface FederationSummary {
   invite: string;
   nostr_votes: FederationRating;
   health: FederationHealth;
+  // All-time transaction volume in millisatoshis (Amount serializes as a raw
+  // number), from the `federation_tx_daily` matview. 0 when no rows yet.
+  total_volume: number;
+  // All-time fedimint-transaction count. 0 when no rows yet.
+  total_tx_count: number;
 }
 
 export interface FederationRating {

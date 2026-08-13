@@ -173,4 +173,81 @@ async fn federation_summary_matches_list_entry() {
         serde_json::to_value(&single).unwrap(),
         serde_json::to_value(&list[0]).unwrap()
     );
+
+    // With no transactions, the all-time totals fall back to zero.
+    assert_eq!(single.total_tx_count, 0);
+    assert_eq!(single.total_volume, fedimint_core::Amount::ZERO);
+}
+
+/// `federation_summary.total_tx_count`/`total_volume` are summed from the
+/// `federation_tx_daily` matview. Insert two transactions with known input
+/// amounts and assert the summary reports the all-time count and volume.
+#[tokio::test]
+async fn federation_summary_reports_all_time_totals() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed_bytes = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, 0, ''::bytea)",
+        &[&fed_bytes],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+         VALUES ($1, 0, 'wallet', 0, '2024-01-15 12:00:00')",
+        &[&fed_bytes],
+    )
+    .await
+    .unwrap();
+    fmo_core::db::session_times::recompute_full(&conn)
+        .await
+        .unwrap();
+
+    // Two transactions in the same session, each with one input.
+    conn.execute(
+        "INSERT INTO transactions (federation_id, txid, session_index, item_index, data)
+         VALUES ($1, $2, 0, 0, ''::bytea), ($1, $3, 0, 1, ''::bytea)",
+        &[&fed_bytes, &b"txid_a".to_vec(), &b"txid_b".to_vec()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transaction_inputs (federation_id, txid, in_index, kind, amount_msat)
+         VALUES ($1, $2, 0, 'dummy', 1000), ($1, $3, 0, 'dummy', 500)",
+        &[&fed_bytes, &b"txid_a".to_vec(), &b"txid_b".to_vec()],
+    )
+    .await
+    .unwrap();
+
+    conn.batch_execute("REFRESH MATERIALIZED VIEW federation_tx_daily")
+        .await
+        .unwrap();
+    drop(conn);
+
+    let registry = ModuleRegistry::new(vec![]);
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        registry,
+    )
+    .await
+    .unwrap();
+
+    let summary = observer.federation_summary(federation_id).await.unwrap();
+    assert_eq!(summary.total_tx_count, 2);
+    assert_eq!(
+        summary.total_volume,
+        fedimint_core::Amount::from_msats(1500)
+    );
 }

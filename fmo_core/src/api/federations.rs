@@ -264,6 +264,10 @@ impl FederationObserver {
 
         let deposits = self.get_federation_assets(federation.federation_id).await?;
 
+        let (total_tx_count, total_volume) = self
+            .get_federation_all_time_totals(federation.federation_id)
+            .await?;
+
         let name = self
             .consensus_meta_cache()
             .fetch_meta_cached(&config_to_json(federation.config.clone(), self.registry())?)
@@ -309,7 +313,46 @@ impl FederationObserver {
             invite,
             nostr_votes: self.federation_rating(federation.federation_id).await?,
             health,
+            total_volume,
+            total_tx_count,
         })
+    }
+
+    /// All-time (`tx_count`, `volume`) for a federation, summed from the
+    /// `federation_tx_daily` matview (schema/core/v5.sql). That matview already
+    /// precomputes per-federation daily rollups keyed by `(federation_id,
+    /// day)`, so this is a cheap index range scan rather than a full
+    /// `transactions`/`transaction_inputs` aggregate. `volume` mirrors
+    /// `federation_tx_daily.volume_msat` (summed transaction input amounts),
+    /// the same grain the fleet-wide `/federations/totals` reports. Federations
+    /// with no rows yet return `(0, Amount::ZERO)`.
+    async fn get_federation_all_time_totals(
+        &self,
+        federation_id: FederationId,
+    ) -> anyhow::Result<(u64, Amount)> {
+        #[derive(Debug, FromRow)]
+        struct AllTimeTotalsRow {
+            tx_count: i64,
+            volume_msat: i64,
+        }
+
+        // language=postgresql
+        let row = query_one::<AllTimeTotalsRow>(
+            &self.connection().await?,
+            "
+            SELECT COALESCE(SUM(tx_count), 0)::bigint    AS tx_count,
+                   COALESCE(SUM(volume_msat), 0)::bigint AS volume_msat
+            FROM federation_tx_daily
+            WHERE federation_id = $1
+        ",
+            &[&federation_id.consensus_encode_to_vec()],
+        )
+        .await?;
+
+        Ok((
+            row.tx_count as u64,
+            Amount::from_msats(row.volume_msat as u64),
+        ))
     }
 
     async fn federation_activity(

@@ -1,27 +1,32 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../services/api';
 import type { FederationSummary } from '../types/api';
 import { Totals } from '../components/Totals';
 import { FederationRow } from '../components/FederationRow';
-import { ratingIndex } from '../utils/format';
+import {
+  DEFAULT_SORT_KEY,
+  SORT_OPTIONS,
+  defaultDirectionFor,
+  sortFederations,
+  type SortDirection,
+  type SortKey,
+} from '../utils/sortFederations';
 
 export function Home() {
   const [federations, setFederations] = useState<FederationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [collapseOffline, setCollapseOffline] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>(DEFAULT_SORT_KEY);
+  const [sortDirection, setSortDirection] = useState<SortDirection>(
+    defaultDirectionFor(DEFAULT_SORT_KEY)
+  );
 
   useEffect(() => {
     api
       .getFederations()
       .then((data) => {
-        const federationsWithStats = data
-          .sort((a, b) => {
-            const aIndex = ratingIndex(a.nostr_votes.count, a.nostr_votes.avg);
-            const bIndex = ratingIndex(b.nostr_votes.count, b.nostr_votes.avg);
-            return bIndex - aIndex;
-          });
-        setFederations(federationsWithStats);
+        setFederations(data);
         setLoading(false);
       })
       .catch((err) => {
@@ -29,6 +34,14 @@ export function Home() {
         setLoading(false);
       });
   }, []);
+
+  // Selecting a new metric resets the direction to that metric's natural
+  // "best first" order (largest numbers first, names A->Z); the toggle then
+  // lets the user flip it.
+  const handleSortKeyChange = (key: SortKey) => {
+    setSortKey(key);
+    setSortDirection(defaultDirectionFor(key));
+  };
 
   const activeFederations = federations.filter((fed) => fed.health !== 'offline');
   const offlineFederations = federations.filter((fed) => fed.health === 'offline');
@@ -45,8 +58,18 @@ export function Home() {
     });
   };
 
-  const filteredActiveFederations = filterFederations(activeFederations);
-  const filteredOfflineFederations = filterFederations(offlineFederations);
+  const filteredActiveFederations = useMemo(
+    () => sortFederations(filterFederations(activeFederations), sortKey, sortDirection),
+    // filterFederations is a stable closure over searchQuery; list the values
+    // its result actually depends on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [federations, searchQuery, sortKey, sortDirection]
+  );
+  const filteredOfflineFederations = useMemo(
+    () => sortFederations(filterFederations(offlineFederations), sortKey, sortDirection),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [federations, searchQuery, sortKey, sortDirection]
+  );
 
   // Compute global maxes across all federations for consistent chart scale
   const globalMaxTransaction = federations.reduce((max, fed) => {
@@ -113,6 +136,54 @@ export function Home() {
             </button>
           )}
         </div>
+      </div>
+
+  {/* Sort controls */}
+  <div className="mb-4 flex items-center justify-end gap-2">
+        <label
+          htmlFor="federation-sort"
+          className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-400"
+        >
+          Sort by
+        </label>
+        <select
+          id="federation-sort"
+          value={sortKey}
+          onChange={(e) => handleSortKeyChange(e.target.value as SortKey)}
+          className="text-xs sm:text-sm rounded-lg border border-gray-300 bg-white p-2 text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+        >
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.key} value={opt.key}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() =>
+            setSortDirection((dir) => (dir === 'asc' ? 'desc' : 'asc'))
+          }
+          aria-label={
+            sortDirection === 'asc' ? 'Sort ascending' : 'Sort descending'
+          }
+          title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+          className="rounded-lg border border-gray-300 bg-white p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+        >
+          <svg
+            className={`w-3 h-3 transition-transform ${sortDirection === 'asc' ? 'rotate-180' : ''}`}
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 10 6"
+          >
+            <path
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M9 5 5 1 1 5"
+            />
+          </svg>
+        </button>
       </div>
 
   <div className="relative overflow-x-auto bg-white shadow-md rounded-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
