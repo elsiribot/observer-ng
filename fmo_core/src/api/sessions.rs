@@ -102,16 +102,27 @@ pub(super) async fn session_items(
 #[derive(FromRow)]
 struct SessionSummaryRow {
     session_index: i64,
-    estimated_time: Option<i64>,
+    estimated_session_timestamp: Option<chrono::NaiveDateTime>,
+    next_vote_time: Option<chrono::NaiveDateTime>,
     tx_count: i64,
     items_by_kind: serde_json::Value,
 }
 
 impl From<SessionSummaryRow> for SessionSummary {
     fn from(row: SessionSummaryRow) -> Self {
+        // Session-level: no per-item `synced_at`, so the source is only ever
+        // "voted"/"interpolated"/None.
+        let time = crate::api::time_estimate::resolve_time(
+            None,
+            row.estimated_session_timestamp,
+            row.next_vote_time,
+        );
         SessionSummary {
             session_index: row.session_index,
-            estimated_time: row.estimated_time,
+            estimated_time: time.estimated_time,
+            time_lower: time.time_lower,
+            time_upper: time.time_upper,
+            time_source: time.time_source.map(str::to_owned),
             tx_count: row.tx_count,
             items_by_kind: row.items_by_kind,
         }
@@ -129,7 +140,9 @@ struct SessionItemRow {
     user_tx_kind: Option<String>,
     direction: Option<String>,
     details: Option<serde_json::Value>,
-    estimated_time: Option<i64>,
+    synced_at: Option<chrono::NaiveDateTime>,
+    estimated_session_timestamp: Option<chrono::NaiveDateTime>,
+    next_vote_time: Option<chrono::NaiveDateTime>,
     role: Option<String>,
 }
 
@@ -148,7 +161,9 @@ impl FederationObserver {
 
         // language=postgresql
         const QUERY: &str = "
-            SELECT ss.session_index::bigint, EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+            SELECT ss.session_index::bigint,
+                   st.estimated_session_timestamp AS estimated_session_timestamp,
+                   st.next_vote_time AS next_vote_time,
                    ss.tx_count::bigint, ss.items_by_kind
             FROM session_stats ss
             LEFT JOIN session_times st ON st.federation_id = ss.federation_id AND st.session_index = ss.session_index
@@ -200,7 +215,9 @@ impl FederationObserver {
                    encode(t.txid,'hex') AS txid,
                    uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                    NULL::jsonb AS details,
-                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                   t.synced_at AS synced_at,
+                   st.estimated_session_timestamp AS estimated_session_timestamp,
+                   st.next_vote_time AS next_vote_time,
                    uxt.role
             FROM transactions t
             {USER_TX_LATERAL}
@@ -208,7 +225,9 @@ impl FederationObserver {
             WHERE t.federation_id=$1 AND t.session_index=$2
             UNION ALL
             SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL, NULL, NULL, ci.details,
-                   EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                   ci.synced_at,
+                   st.estimated_session_timestamp,
+                   st.next_vote_time,
                    NULL::text AS role
             FROM consensus_items ci
             LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
@@ -230,19 +249,29 @@ impl FederationObserver {
 
         Ok(rows
             .into_iter()
-            .map(|row| SessionItem {
-                session_index,
-                item_index: row.item_index,
-                item_type: row.item_type,
-                kind: row.kind,
-                peer_id: row.peer_id,
-                txid: row.txid,
-                user_tx_key: row.user_tx_key,
-                user_tx_kind: row.user_tx_kind,
-                direction: row.direction,
-                details: row.details,
-                estimated_time: row.estimated_time,
-                role: row.role,
+            .map(|row| {
+                let time = crate::api::time_estimate::resolve_time(
+                    row.synced_at,
+                    row.estimated_session_timestamp,
+                    row.next_vote_time,
+                );
+                SessionItem {
+                    session_index,
+                    item_index: row.item_index,
+                    item_type: row.item_type,
+                    kind: row.kind,
+                    peer_id: row.peer_id,
+                    txid: row.txid,
+                    user_tx_key: row.user_tx_key,
+                    user_tx_kind: row.user_tx_kind,
+                    direction: row.direction,
+                    details: row.details,
+                    estimated_time: time.estimated_time,
+                    time_lower: time.time_lower,
+                    time_upper: time.time_upper,
+                    time_source: time.time_source.map(str::to_owned),
+                    role: row.role,
+                }
             })
             .collect())
     }

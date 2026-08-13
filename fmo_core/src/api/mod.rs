@@ -4,6 +4,7 @@ pub mod federations;
 pub mod live;
 pub mod sessions;
 mod sql_fragments;
+mod time_estimate;
 pub mod transactions;
 pub mod user_transactions;
 

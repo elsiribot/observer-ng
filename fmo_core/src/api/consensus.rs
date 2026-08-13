@@ -101,12 +101,22 @@ pub(super) struct ConsensusItemRow {
     user_tx_kind: Option<String>,
     direction: Option<String>,
     details: Option<serde_json::Value>,
-    estimated_time: Option<i64>,
+    /// The item's own first-seen live stamp (tx branch reads
+    /// `transactions.synced_at`, ci branch `consensus_items.synced_at`).
+    synced_at: Option<chrono::NaiveDateTime>,
+    /// The session's forward-/backward-filled vote bounds.
+    estimated_session_timestamp: Option<chrono::NaiveDateTime>,
+    next_vote_time: Option<chrono::NaiveDateTime>,
     role: Option<String>,
 }
 
 impl From<ConsensusItemRow> for SessionItem {
     fn from(row: ConsensusItemRow) -> Self {
+        let time = crate::api::time_estimate::resolve_time(
+            row.synced_at,
+            row.estimated_session_timestamp,
+            row.next_vote_time,
+        );
         SessionItem {
             session_index: row.session_index,
             item_index: row.item_index,
@@ -118,7 +128,10 @@ impl From<ConsensusItemRow> for SessionItem {
             user_tx_kind: row.user_tx_kind,
             direction: row.direction,
             details: row.details,
-            estimated_time: row.estimated_time,
+            estimated_time: time.estimated_time,
+            time_lower: time.time_lower,
+            time_upper: time.time_upper,
+            time_source: time.time_source.map(str::to_owned),
             role: row.role,
         }
     }
@@ -138,7 +151,9 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
            encode(t.txid,'hex') AS txid,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details,
-           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+           t.synced_at AS synced_at,
+           st.estimated_session_timestamp AS estimated_session_timestamp,
+           st.next_vote_time AS next_vote_time,
            uxt.role
     FROM transactions t
     {USER_TX_LATERAL}
@@ -163,14 +178,17 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
 static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details, estimated_time, role
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details,
+           synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 t.synced_at AS synced_at,
+                 st.estimated_session_timestamp AS estimated_session_timestamp,
+                 st.next_vote_time AS next_vote_time,
                  uxt.role
           FROM transactions t
           {USER_TX_LATERAL}
@@ -182,7 +200,9 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
                  NULL, NULL, NULL, NULL, ci.details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 ci.synced_at,
+                 st.estimated_session_timestamp,
+                 st.next_vote_time,
                  NULL::text AS role
           FROM consensus_items ci
           LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index
@@ -202,7 +222,9 @@ const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
            NULL::text AS txid, NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
            ci.details,
-           EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+           ci.synced_at AS synced_at,
+           st.estimated_session_timestamp AS estimated_session_timestamp,
+           st.next_vote_time AS next_vote_time,
            NULL::text AS role
     FROM consensus_items ci
     LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index

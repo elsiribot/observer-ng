@@ -44,14 +44,17 @@ use crate::query::query;
 static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details, estimated_time, role
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details,
+           synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 t.synced_at AS synced_at,
+                 st.estimated_session_timestamp AS estimated_session_timestamp,
+                 st.next_vote_time AS next_vote_time,
                  uxt.role
           FROM transactions t
           {USER_TX_LATERAL}
@@ -64,7 +67,9 @@ static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
                  NULL, NULL, NULL, NULL, ci.details,
-                 EXTRACT(EPOCH FROM st.estimated_session_timestamp)::bigint AS estimated_time,
+                 ci.synced_at,
+                 st.estimated_session_timestamp,
+                 st.next_vote_time,
                  NULL::text AS role
           FROM consensus_items ci
           LEFT JOIN session_times st ON st.federation_id = ci.federation_id AND st.session_index = ci.session_index

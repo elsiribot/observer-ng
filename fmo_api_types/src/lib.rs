@@ -138,7 +138,19 @@ pub struct GatewayUptimeMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_index: i64,
+    /// Point-estimate wall-clock time (epoch seconds): the midpoint of the
+    /// vote-based interval, or its lower bound if unbounded. Kept for
+    /// back-compat; prefer `time_lower`/`time_upper`/`time_source`.
     pub estimated_time: Option<i64>,
+    /// Lower bound of the estimated-time interval (epoch seconds).
+    pub time_lower: Option<i64>,
+    /// Upper bound of the estimated-time interval (epoch seconds), `None` when
+    /// unbounded (session more recent than the last known vote).
+    pub time_upper: Option<i64>,
+    /// How the time was derived: `"voted"` (zero-width) or `"interpolated"`
+    /// (has a spread); `None` when unavailable. Sessions never carry the
+    /// per-item `"observed"` source.
+    pub time_source: Option<String>,
     pub tx_count: i64,
     pub items_by_kind: serde_json::Value,
 }
@@ -165,9 +177,23 @@ pub struct SessionItem {
     /// `None` alongside `user_tx_kind`.
     pub direction: Option<String>,
     pub details: Option<serde_json::Value>,
-    /// The item's session's estimated wall-clock time (epoch seconds), from
-    /// `session_times`; `None` if the session has no time vote yet.
+    /// The item's best point-estimate wall-clock time (epoch seconds): the
+    /// exact observed time if the item was seen live, else the midpoint of
+    /// the vote-based uncertainty interval (or its lower bound if unbounded).
+    /// `None` if the session has no time information yet. Kept for
+    /// back-compat; prefer `time_lower`/`time_upper`/`time_source`.
     pub estimated_time: Option<i64>,
+    /// Lower bound of the estimated-time interval (epoch seconds). Equals
+    /// `time_upper` for an exactly-known (observed or directly-voted) time.
+    pub time_lower: Option<i64>,
+    /// Upper bound of the estimated-time interval (epoch seconds), or `None`
+    /// when unbounded (a session more recent than the last known vote).
+    pub time_upper: Option<i64>,
+    /// How the time was derived: `"observed"` (exact, seen live),
+    /// `"voted"` (a direct time vote for this session, zero-width interval),
+    /// or `"interpolated"` (forward-filled between votes, has a spread).
+    /// `None` when no time information is available.
+    pub time_source: Option<String>,
     /// The tx's role in its gold user transaction: offer/fund/claim/cancel/
     /// refund/self; `None` for CIs and unclassified txs.
     pub role: Option<String>,

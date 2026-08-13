@@ -223,3 +223,114 @@ async fn consensus_stream_filters_and_paging() {
     assert_eq!(wallet_page.items[0].item_index, 1);
     assert_eq!(wallet_page.items[0].kind.as_deref(), Some("wallet"));
 }
+
+/// Per-item estimated-time resolution into `(estimated_time, time_lower,
+/// time_upper, time_source)`: a live-observed item (with `synced_at`) resolves
+/// to an exact "observed" zero-width interval; a directly-voted session's item
+/// to "voted" (also zero-width); a vote-less session's item bracketed by votes
+/// on both sides to "interpolated" with a real spread (upper > lower).
+#[tokio::test]
+async fn consensus_stream_resolves_time_estimate_and_interval() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = dummy_config();
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+
+    // Sessions 0..3. Votes on 1 (T1) and 3 (T3) only, so session 2 (vote-less,
+    // between the two votes) is bracketed on both sides -> a real spread.
+    conn.execute(
+        "INSERT INTO sessions (federation_id, session_index, data)
+         VALUES ($1, 0, ''::bytea), ($1, 1, ''::bytea), ($1, 2, ''::bytea), ($1, 3, ''::bytea)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+
+    // Session-0 tx: carries a first-seen `synced_at` -> "observed" (exact),
+    // overriding the vote-based estimate.
+    // Session-2 tx: no `synced_at` -> vote-based interval, interpolated.
+    conn.execute(
+        "INSERT INTO transactions (federation_id, txid, session_index, item_index, data, synced_at)
+         VALUES ($1, $2, 0, 0, ''::bytea, '2024-06-06 06:06:06'),
+                ($1, $3, 2, 0, ''::bytea, NULL)",
+        &[&fed, &b"tx_obs".to_vec(), &b"tx_interp".to_vec()],
+    )
+    .await
+    .unwrap();
+
+    // Session-1 CI: no `synced_at`, session directly voted -> "voted".
+    conn.execute(
+        "INSERT INTO consensus_items (federation_id, session_index, item_index, peer_id, kind)
+         VALUES ($1, 1, 0, 0, 'wallet')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+         VALUES ($1, 1, 'wallet', 0, '2024-01-02 00:00:00'),
+                ($1, 3, 'wallet', 0, '2024-01-04 00:00:00')",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    fmo_core::db::session_times::recompute_full(&conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let registry = ModuleRegistry::new(vec![]);
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        registry,
+    )
+    .await
+    .unwrap();
+
+    let page = observer
+        .federation_consensus_page(federation_id, "all", None, 50)
+        .await
+        .unwrap();
+
+    let by_session = |s: i64| {
+        page.items
+            .iter()
+            .find(|i| i.session_index == s)
+            .unwrap_or_else(|| panic!("item for session {s}"))
+    };
+
+    // Observed: exact, zero-width, source "observed".
+    let obs = by_session(0);
+    assert_eq!(obs.time_source.as_deref(), Some("observed"));
+    assert!(obs.time_lower.is_some());
+    assert_eq!(obs.time_lower, obs.time_upper);
+    assert_eq!(obs.estimated_time, obs.time_lower);
+
+    // Voted: zero-width interval at the vote, source "voted".
+    let voted = by_session(1);
+    assert_eq!(voted.time_source.as_deref(), Some("voted"));
+    assert!(voted.time_lower.is_some());
+    assert_eq!(voted.time_lower, voted.time_upper);
+    assert_eq!(voted.estimated_time, voted.time_lower);
+
+    // Interpolated: real spread, source "interpolated", estimate is midpoint.
+    let interp = by_session(2);
+    assert_eq!(interp.time_source.as_deref(), Some("interpolated"));
+    let lower = interp.time_lower.unwrap();
+    let upper = interp.time_upper.unwrap();
+    assert!(upper > lower, "interpolated item must have a spread");
+    assert_eq!(interp.estimated_time, Some((lower + upper) / 2));
+    // Lower is session 1's vote, upper is session 3's vote.
+    assert_eq!(lower, voted.time_lower.unwrap());
+}
