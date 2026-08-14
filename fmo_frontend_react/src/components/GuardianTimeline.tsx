@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { api } from '../services/api';
 import type { GuardianTimeline as GuardianTimelineData, TimeInterval } from '../types/api';
 import { formatTimestamp } from '../utils/format';
@@ -43,11 +44,14 @@ export function formatDuration(seconds: number): string {
   return `${m}m`;
 }
 
-// Tooltip text for an interval bar: "<start> – <end> (<duration>)".
-function intervalTooltip(interval: TimeInterval, label: string): string {
-  return `${label}: ${formatTimestamp(interval.start)} – ${formatTimestamp(interval.end)} (${formatDuration(
-    interval.end - interval.start
-  )})`;
+// What the floating hover tooltip is currently describing: an outage interval
+// plus the cursor position (viewport coords) to anchor the tooltip near.
+interface HoverState {
+  x: number;
+  y: number;
+  label: string;
+  start: number;
+  end: number;
 }
 
 const WINDOWS: { label: string; value: string }[] = [
@@ -74,6 +78,22 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
   const [data, setData] = useState<GuardianTimelineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The outage bar currently under the cursor, if any (drives the floating
+  // tooltip). Cleared on mouse-leave.
+  const [hover, setHover] = useState<HoverState | null>(null);
+
+  // Mouse handlers for one outage bar. `onMouseMove` keeps the tooltip pinned
+  // to the cursor as it travels across a wide bar; `onMouseEnter` also sets the
+  // full info so moving between two touching bars swaps the tooltip cleanly.
+  const barHandlers = (label: string, iv: TimeInterval) => {
+    const set = (e: ReactMouseEvent) =>
+      setHover({ x: e.clientX, y: e.clientY, label, start: iv.start, end: iv.end });
+    return {
+      onMouseEnter: set,
+      onMouseMove: set,
+      onMouseLeave: () => setHover(null),
+    };
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -246,9 +266,9 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
                 return (
                   <div
                     key={`inop-${i}`}
-                    className="absolute inset-y-0 bg-orange-500/25 border-x border-orange-500/50 pointer-events-auto"
+                    className="absolute inset-y-0 bg-orange-500/25 hover:bg-orange-500/40 border-x border-orange-500/50 pointer-events-auto"
                     style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.4)}%` }}
-                    title={intervalTooltip(iv, 'Inoperable')}
+                    {...barHandlers('Federation inoperable (quorum lost)', iv)}
                   />
                 );
               })}
@@ -269,7 +289,7 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
                       key={`lag-${i}`}
                       className="absolute top-1 bottom-1 bg-amber-400 hover:bg-amber-300 rounded-sm"
                       style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.4)}%` }}
-                      title={intervalTooltip(iv, `${g.name} (lagging)`)}
+                      {...barHandlers(`${g.name} lagging (behind on consensus)`, iv)}
                     />
                   );
                 })}
@@ -281,7 +301,7 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
                       key={`off-${i}`}
                       className="absolute top-1 bottom-1 bg-red-500 hover:bg-red-400 rounded-sm"
                       style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.4)}%` }}
-                      title={intervalTooltip(iv, g.name)}
+                      {...barHandlers(`${g.name} offline`, iv)}
                     />
                   );
                 })}
@@ -318,6 +338,36 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
           No outages recorded in this window
         </div>
       )}
+
+      {/* Floating outage tooltip, anchored to the cursor. Flips to the other
+          side of the pointer near the viewport's right/bottom edge so it never
+          spills off-screen. `pointer-events-none` so it can't steal the hover. */}
+      {hover &&
+        (() => {
+          // NB: the `window` state var (timeline range) shadows the global
+          // here, so read viewport size via `globalThis`.
+          const flipX = hover.x > globalThis.innerWidth - 260;
+          const flipY = hover.y > globalThis.innerHeight - 120;
+          return (
+            <div
+              className="fixed z-50 pointer-events-none rounded-md bg-gray-900/95 dark:bg-gray-950/95 text-white shadow-lg ring-1 ring-black/10 px-2.5 py-1.5 text-xs leading-relaxed"
+              style={{
+                left: flipX ? hover.x - 14 : hover.x + 14,
+                top: flipY ? hover.y - 14 : hover.y + 14,
+                transform: `translate(${flipX ? '-100%' : '0'}, ${flipY ? '-100%' : '0'})`,
+                maxWidth: 260,
+              }}
+            >
+              <div className="font-semibold">{hover.label}</div>
+              <div className="text-gray-200 tabular-nums whitespace-nowrap">
+                {formatTimestamp(hover.start)} → {formatTimestamp(hover.end)}
+              </div>
+              <div className="text-gray-400">
+                Duration: {formatDuration(hover.end - hover.start)}
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }
