@@ -819,3 +819,78 @@ async fn guardian_timeline_guardian_without_samples_has_empty_lane() {
     assert!(timeline.guardians[0].offline_intervals.is_empty());
     assert!(timeline.guardians[1].offline_intervals.is_empty());
 }
+
+/// An isolated single-poll failure (one missed poll bracketed by online polls
+/// on both sides) is a transient timeout, not a real outage, and is despiked:
+/// it produces neither a per-guardian offline interval nor an inoperable
+/// window, even when enough guardians blip in the same poll to momentarily drop
+/// the online count below threshold. A run of >=2 consecutive misses is a real
+/// outage and is still reported.
+#[tokio::test]
+async fn guardian_timeline_despikes_single_poll_blips() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    // n=4 => threshold 3. Two guardians blipping in one poll would drop online
+    // to 2 (< 3) at that instant, but despiking must prevent an inoperable run.
+    let (config, federation_id) = multi_guardian_config(4);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..5)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    for (i, &time) in t.iter().enumerate() {
+        // Guardians 0 and 1: always online.
+        insert_health_sample(&conn, &fed, time, 0, true).await;
+        insert_health_sample(&conn, &fed, time, 1, true).await;
+        // Guardian 2: single isolated blip at t2 (online before and after).
+        insert_health_sample(&conn, &fed, time, 2, i != 2).await;
+        // Guardian 3: two-poll outage at t2 AND t3 (a real outage), recovers t4.
+        insert_health_sample(&conn, &fed, time, 3, !(i == 2 || i == 3)).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let timeline = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+    let epoch = |ndt: chrono::NaiveDateTime| ndt.and_utc().timestamp();
+
+    // Guardian 2's single-poll blip is despiked away entirely.
+    assert!(
+        timeline.guardians[2].offline_intervals.is_empty(),
+        "single-poll blip should be despiked"
+    );
+    // Guardian 3's two-poll outage survives, spanning [t2, t4).
+    assert_eq!(timeline.guardians[3].offline_intervals.len(), 1);
+    assert_eq!(
+        timeline.guardians[3].offline_intervals[0].start,
+        epoch(t[2])
+    );
+    assert_eq!(timeline.guardians[3].offline_intervals[0].end, epoch(t[4]));
+
+    // At t2 the raw online count is 2 (< threshold 3), but guardian 2's blip is
+    // despiked to online, so the despiked online count is 3 == threshold and the
+    // federation is never inoperable.
+    assert!(
+        timeline.inoperable_intervals.is_empty(),
+        "a despiked blip must not fabricate an inoperable window"
+    );
+}

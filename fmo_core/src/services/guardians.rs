@@ -145,20 +145,34 @@ impl FederationObserver {
         let health_rows = query::<GuardianHealthRow>(
             &self.connection().await?,
             // language=postgresql
-            "SELECT
-                latest.guardian_id,
-                latest.block_height,
-                (latest.status -> 'federation' ->> 'session_count')::integer AS session_count,
-                last30d.uptime,
-                last30d.latency_ms
-             FROM guardian_health latest
-             INNER JOIN (
-                 SELECT guardian_id, MAX(time) as latest_time
+            "WITH last2 AS (
+                 SELECT guardian_id,
+                        block_height,
+                        (status -> 'federation' ->> 'session_count')::integer AS sc,
+                        ROW_NUMBER() OVER (PARTITION BY guardian_id ORDER BY time DESC) AS rn
                  FROM guardian_health
                  WHERE federation_id = $1
+             ),
+             -- Debounce a single most-recent missed poll: report the newest
+             -- non-null value among each guardian's two most recent samples.
+             -- Both null => the guardian is (still) offline (session_count stays
+             -- NULL). This keeps a lone transient timeout from flipping a
+             -- guardian to offline in the panel / fleet health.
+             latest AS (
+                 SELECT guardian_id,
+                        (array_remove(array_agg(block_height ORDER BY rn), NULL))[1] AS block_height,
+                        (array_remove(array_agg(sc ORDER BY rn), NULL))[1] AS session_count
+                 FROM last2
+                 WHERE rn <= 2
                  GROUP BY guardian_id
-             ) max_times ON latest.guardian_id = max_times.guardian_id
-                           AND latest.time = max_times.latest_time
+             )
+             SELECT
+                latest.guardian_id,
+                latest.block_height,
+                latest.session_count,
+                last30d.uptime,
+                last30d.latency_ms
+             FROM latest
              INNER JOIN (
                  SELECT
                      guardian_id,
@@ -168,8 +182,7 @@ impl FederationObserver {
                  WHERE federation_id = $1
                    AND time > NOW() - INTERVAL '30 days'
                  GROUP BY guardian_id
-             ) last30d ON latest.guardian_id = last30d.guardian_id
-             WHERE latest.federation_id = $1",
+             ) last30d ON latest.guardian_id = last30d.guardian_id",
             &[&federation_id.consensus_encode_to_vec()],
         )
         .await?;
@@ -247,20 +260,22 @@ impl FederationObserver {
         let federations = query::<FederationHealthRow>(
             &self.connection().await?,
             // language=postgresql
-            "SELECT
-                gh.federation_id,
-                COUNT(DISTINCT gh.guardian_id)::int as guardians,
-                COUNT(DISTINCT CASE WHEN gh.status -> 'federation' ->> 'session_count' IS NOT NULL
-                                   THEN gh.guardian_id END)::int as online_guardians
-             FROM guardian_health gh
-             INNER JOIN (
-                 SELECT federation_id, guardian_id, MAX(time) as latest_time
+            // A guardian counts as online if EITHER of its two most recent
+            // samples reported (debounce a single transient timeout), matching
+            // the per-federation panel's latest-status rule so the fleet health
+            // badge doesn't flip to degraded on one missed poll.
+            "WITH last2 AS (
+                 SELECT federation_id, guardian_id,
+                        (status -> 'federation' ->> 'session_count') IS NOT NULL AS reported,
+                        ROW_NUMBER() OVER (PARTITION BY federation_id, guardian_id ORDER BY time DESC) AS rn
                  FROM guardian_health
-                 GROUP BY federation_id, guardian_id
-             ) latest ON gh.federation_id = latest.federation_id
-                        AND gh.guardian_id = latest.guardian_id
-                        AND gh.time = latest.latest_time
-             GROUP BY gh.federation_id",
+             )
+             SELECT federation_id,
+                    COUNT(DISTINCT guardian_id)::int AS guardians,
+                    COUNT(DISTINCT guardian_id) FILTER (WHERE reported)::int AS online_guardians
+             FROM last2
+             WHERE rn <= 2
+             GROUP BY federation_id",
             &[],
         )
         .await?;
@@ -364,10 +379,28 @@ impl FederationObserver {
         let offline_rows = query::<OfflineIntervalRow>(
             &conn,
             // language=postgresql
-            "WITH samples AS (
-                 SELECT guardian_id, time, (status IS NOT NULL) AS online
+            "WITH raw AS (
+                 SELECT guardian_id, time, (status IS NOT NULL) AS raw_online
                  FROM guardian_health
                  WHERE federation_id = $1 AND time >= $2 AND time <= $3
+             ),
+             -- Despike single-poll false positives: a lone missed poll whose
+             -- immediate neighbours both reported is a transient timeout, not a
+             -- real outage (over 80% of raw outage *events* are these ~60s
+             -- blips but under 1% of downtime). Reclassify it as online so the
+             -- timeline only shows outages of >=2 consecutive missed polls.
+             -- Runs of >=2 misses are untouched and keep their full length.
+             samples AS (
+                 SELECT guardian_id, time,
+                        CASE
+                            WHEN NOT raw_online
+                                 AND LAG(raw_online) OVER w = true
+                                 AND LEAD(raw_online) OVER w = true
+                            THEN true
+                            ELSE raw_online
+                        END AS online
+                 FROM raw
+                 WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
              ),
              flagged AS (
                  SELECT guardian_id, time,
@@ -449,11 +482,31 @@ impl FederationObserver {
         let inoperable_rows = query::<InoperableIntervalRow>(
             &conn,
             // language=postgresql
-            "WITH poll_counts AS (
-                 SELECT time,
-                        COUNT(*) FILTER (WHERE status IS NOT NULL) AS online_count
+            // Despike per guardian first (same rule as the offline query), then
+            // count online guardians per poll, so an observer-side blip that
+            // drops several guardians for a single poll doesn't fabricate an
+            // inoperable (sub-threshold) window.
+            "WITH raw AS (
+                 SELECT guardian_id, time, (status IS NOT NULL) AS raw_online
                  FROM guardian_health
                  WHERE federation_id = $1 AND time >= $2 AND time <= $3
+             ),
+             despiked AS (
+                 SELECT time,
+                        CASE
+                            WHEN NOT raw_online
+                                 AND LAG(raw_online) OVER w = true
+                                 AND LEAD(raw_online) OVER w = true
+                            THEN true
+                            ELSE raw_online
+                        END AS online
+                 FROM raw
+                 WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
+             ),
+             poll_counts AS (
+                 SELECT time,
+                        COUNT(*) FILTER (WHERE online) AS online_count
+                 FROM despiked
                  GROUP BY time
              ),
              flagged AS (
