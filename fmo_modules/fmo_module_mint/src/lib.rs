@@ -186,14 +186,24 @@ async fn denominations(
         in_circulation: i64,
     }
 
+    // Pad to the GLOBAL denomination set -- every denomination used by any
+    // observed federation -- zero-filling the ones this federation never used,
+    // so denomination histograms line up across federations and are directly
+    // comparable. The `EXISTS` guard keeps a federation with no mint notes of
+    // its own returning an empty list (frontend shows an empty state) rather
+    // than a chart of all-zero bars.
     // language=postgresql
     let sql = "
-        SELECT denomination_msat,
-               issued,
-               GREATEST(issued - spent, 0) AS in_circulation
-        FROM fmo_mint.note_denominations
-        WHERE federation_id = $1
-        ORDER BY denomination_msat
+        SELECT d.denomination_msat,
+               COALESCE(n.issued, 0) AS issued,
+               GREATEST(COALESCE(n.issued, 0) - COALESCE(n.spent, 0), 0) AS in_circulation
+        FROM (SELECT DISTINCT denomination_msat FROM fmo_mint.note_denominations) d
+        LEFT JOIN fmo_mint.note_denominations n
+               ON n.denomination_msat = d.denomination_msat
+              AND n.federation_id = $1
+        WHERE EXISTS (SELECT 1 FROM fmo_mint.note_denominations f
+                      WHERE f.federation_id = $1)
+        ORDER BY d.denomination_msat
     ";
 
     let rows = query::<DenominationRow>(

@@ -37,7 +37,13 @@ async fn setup_mint_schema(pool: &deadpool_postgres::Pool) {
     .unwrap();
 }
 
-/// The exact read query behind the `/denominations` endpoint.
+/// The exact read query behind the `/denominations` endpoint. Kept in sync
+/// manually with the `denominations(...)` fn in `src/lib.rs` (the module keeps
+/// its endpoint SQL private, so tests mirror it verbatim, as done elsewhere in
+/// this repo -- e.g. walletv2's LATEST_RESOLVED test). Pads each federation's
+/// response to the GLOBAL denomination set, zero-filling denominations this
+/// federation never used, with an `EXISTS` guard so a federation with no mint
+/// notes of its own returns an empty list.
 async fn read_denominations(
     pool: &deadpool_postgres::Pool,
     fed: &[u8],
@@ -46,10 +52,16 @@ async fn read_denominations(
         .await
         .unwrap()
         .query(
-            "SELECT denomination_msat, issued, GREATEST(issued - spent, 0) AS in_circulation
-             FROM fmo_mint.note_denominations
-             WHERE federation_id = $1
-             ORDER BY denomination_msat",
+            "SELECT d.denomination_msat,
+                    COALESCE(n.issued, 0) AS issued,
+                    GREATEST(COALESCE(n.issued, 0) - COALESCE(n.spent, 0), 0) AS in_circulation
+             FROM (SELECT DISTINCT denomination_msat FROM fmo_mint.note_denominations) d
+             LEFT JOIN fmo_mint.note_denominations n
+                    ON n.denomination_msat = d.denomination_msat
+                   AND n.federation_id = $1
+             WHERE EXISTS (SELECT 1 FROM fmo_mint.note_denominations f
+                           WHERE f.federation_id = $1)
+             ORDER BY d.denomination_msat",
             &[&fed],
         )
         .await
@@ -200,4 +212,71 @@ async fn incremental_upserts_accumulate_and_clamp() {
         read_denominations(&pool, &fed).await,
         vec![(1000, 2, 1), (2000, 1, 0)]
     );
+}
+
+#[tokio::test]
+async fn padding_shares_denomination_axis_across_federations() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_all(&pool).await;
+
+    // Three federations with distinct ids. Raw inserts (rather than
+    // `insert_federation`/`minimal_config`) since we need multiple distinct ids.
+    let fed_a: &[u8] = &[0xaa; 32];
+    let fed_b: &[u8] = &[0xbb; 32];
+    let fed_c: &[u8] = &[0xcc; 32];
+    {
+        let conn = pool.get().await.unwrap();
+        for fed in [fed_a, fed_b, fed_c] {
+            conn.execute(
+                "INSERT INTO federations (federation_id, config) VALUES ($1, ''::bytea)",
+                &[&fed],
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    // Empty core mint tables -> migration backfill inserts nothing; the counts
+    // below are seeded directly.
+    setup_mint_schema(&pool).await;
+
+    {
+        let conn = pool.get().await.unwrap();
+        // fed A = {1000: issued 3 spent 0, 2000: issued 2 spent 0}
+        // fed B = {1000: issued 1 spent 1, 4000: issued 5 spent 0}
+        // fed C = no rows
+        let rows: [(&[u8], i64, i64, i64); 4] = [
+            (fed_a, 1000, 3, 0),
+            (fed_a, 2000, 2, 0),
+            (fed_b, 1000, 1, 1),
+            (fed_b, 4000, 5, 0),
+        ];
+        for (fed, denom, issued, spent) in rows {
+            conn.execute(
+                "INSERT INTO fmo_mint.note_denominations
+                     (federation_id, denomination_msat, issued, spent)
+                 VALUES ($1, $2, $3, $4)",
+                &[&fed, &denom, &issued, &spent],
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    // Global denomination set is {1000, 2000, 4000}. Each federation is padded
+    // to it, zero-filling the denominations it never used.
+    assert_eq!(
+        read_denominations(&pool, fed_a).await,
+        vec![(1000, 3, 3), (2000, 2, 2), (4000, 0, 0)]
+    );
+    assert_eq!(
+        read_denominations(&pool, fed_b).await,
+        vec![(1000, 1, 0), (2000, 0, 0), (4000, 5, 5)]
+    );
+    // Federation with no mint notes of its own returns empty (EXISTS guard).
+    assert_eq!(read_denominations(&pool, fed_c).await, Vec::new());
 }
