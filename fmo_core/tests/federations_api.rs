@@ -1121,6 +1121,67 @@ async fn guardian_latency_series_and_quorum_line() {
     assert_eq!(series.buckets[2].quorum_ms, None);
 }
 
+/// `federation_uptime` is the threshold-aware operable fraction: polls with at
+/// least `threshold` participating guardians over total polls. With guardian 2
+/// lagging and guardian 3 offline at two of five polls (dropping participation
+/// below threshold 3), 3 of 5 polls are operable => 60%.
+#[tokio::test]
+async fn federation_uptime_is_threshold_aware() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = multi_guardian_config(4);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..5)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    for (i, &time) in t.iter().enumerate() {
+        let i = i as i64;
+        insert_health_sample_sc(&conn, &fed, time, 0, Some(100 + i)).await;
+        insert_health_sample_sc(&conn, &fed, time, 1, Some(100 + i)).await;
+        // Guardian 2 lags at t2/t3 (stuck at 100 while peers advance).
+        let g2 = if i == 2 || i == 3 { 100 } else { 100 + i };
+        insert_health_sample_sc(&conn, &fed, time, 2, Some(g2)).await;
+        // Guardian 3 offline at t2/t3.
+        let g3 = if i == 2 || i == 3 {
+            None
+        } else {
+            Some(100 + i)
+        };
+        insert_health_sample_sc(&conn, &fed, time, 3, g3).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let uptime = observer
+        .federation_uptime(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+
+    assert_eq!(uptime.threshold, 3);
+    assert_eq!(uptime.num_guardians, 4);
+    assert_eq!(uptime.total_polls, 5);
+    assert_eq!(uptime.operable_polls, 3);
+    assert_eq!(uptime.uptime_pct, Some(60.0));
+}
+
 /// A tracked API-URL announcement overrides the guardian's config URL that the
 /// health monitor polls; guardians without an announcement keep their config
 /// URL, and a stored row for an unknown peer is ignored.

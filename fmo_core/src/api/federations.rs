@@ -47,6 +47,10 @@ pub fn get_federations_routes() -> Router<AppState> {
             get(get_federation_health_latency),
         )
         .route(
+            "/:federation_id/health/uptime",
+            get(get_federation_health_uptime),
+        )
+        .route(
             "/:federation_id/transactions",
             get(super::transactions::list_transactions),
         )
@@ -217,6 +221,19 @@ async fn get_federation_health_latency(
         .get_guardian_latency(federation_id, window)
         .await?;
     Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(series)))
+}
+
+async fn get_federation_health_uptime(
+    Path(federation_id): Path<FederationId>,
+    axum::extract::Query(params): axum::extract::Query<TimelineParams>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl IntoResponse> {
+    let window = parse_timeline_window(params.window.as_deref())?;
+    let uptime = state
+        .observer
+        .federation_uptime(federation_id, window)
+        .await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(uptime)))
 }
 
 async fn get_federation_overview(

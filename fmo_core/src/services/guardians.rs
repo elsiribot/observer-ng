@@ -807,6 +807,99 @@ impl FederationObserver {
         })
     }
 
+    /// Threshold-aware federation uptime over the last `window`: the fraction
+    /// of health polls at which at least `threshold` guardians were
+    /// participating (online AND caught up to the consensus tip). Uses the
+    /// same per-poll participating rule and single-poll despiking as the
+    /// timeline's inoperable bands, so the two agree.
+    pub async fn federation_uptime(
+        &self,
+        federation_id: FederationId,
+        window: chrono::Duration,
+    ) -> anyhow::Result<fmo_api_types::FederationUptime> {
+        let federation = self
+            .get_federation(federation_id)
+            .await
+            .context("Unknown federation")?
+            .context("Unknown federation")?;
+
+        let num_guardians = federation.config.global.api_endpoints.len();
+        let threshold = NumPeers::from(num_guardians).threshold();
+
+        let window_end = chrono::Utc::now().naive_utc();
+        let window_start = window_end - window;
+        let fed = federation_id.consensus_encode_to_vec();
+
+        #[derive(FromRow)]
+        struct UptimeRow {
+            total_polls: i64,
+            operable_polls: i64,
+        }
+
+        let row = query::<UptimeRow>(
+            &self.connection().await?,
+            // language=postgresql
+            "WITH base AS (
+                 SELECT guardian_id, time,
+                        (status IS NOT NULL) AS raw_online,
+                        (status -> 'federation' ->> 'session_count')::bigint AS sc
+                 FROM guardian_health
+                 WHERE federation_id = $1 AND time >= $2 AND time <= $3
+             ),
+             tipped AS (
+                 SELECT guardian_id, time, raw_online, sc,
+                        MAX(sc) OVER (PARTITION BY time) AS tip_sc
+                 FROM base
+             ),
+             stated AS (
+                 SELECT guardian_id, time,
+                        (raw_online AND (tip_sc IS NULL OR tip_sc - sc <= 1)) AS participating
+                 FROM tipped
+             ),
+             despiked AS (
+                 SELECT time,
+                        CASE
+                            WHEN NOT participating
+                                 AND LAG(participating) OVER w = true
+                                 AND LEAD(participating) OVER w = true
+                            THEN true
+                            ELSE participating
+                        END AS participating
+                 FROM stated
+                 WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
+             ),
+             poll_counts AS (
+                 SELECT time, COUNT(*) FILTER (WHERE participating) AS online_count
+                 FROM despiked
+                 GROUP BY time
+             )
+             SELECT COUNT(*)::bigint AS total_polls,
+                    COUNT(*) FILTER (WHERE online_count >= $4)::bigint AS operable_polls
+             FROM poll_counts",
+            &[&fed, &window_start, &window_end, &(threshold as i64)],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or(UptimeRow {
+            total_polls: 0,
+            operable_polls: 0,
+        });
+
+        let uptime_pct = (row.total_polls > 0)
+            .then(|| row.operable_polls as f64 / row.total_polls as f64 * 100.0);
+
+        Ok(fmo_api_types::FederationUptime {
+            window_start: window_start.and_utc().timestamp(),
+            window_end: window_end.and_utc().timestamp(),
+            num_guardians,
+            threshold,
+            total_polls: row.total_polls,
+            operable_polls: row.operable_polls,
+            uptime_pct,
+        })
+    }
+
     /// Builds the guardian API-latency time series for a federation over the
     /// last `window`: one bucketed line per guardian plus a derived
     /// quorum-latency line.

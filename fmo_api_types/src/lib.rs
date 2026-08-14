@@ -130,6 +130,30 @@ pub struct GuardianTimeline {
     pub inoperable_intervals: Vec<TimeInterval>,
 }
 
+/// Threshold-aware federation uptime over a window: the fraction of health
+/// polls at which the federation was *operable* — at least `threshold`
+/// guardians participating (online AND caught up to the consensus tip), the
+/// same rule as the timeline's inoperable bands. Sample-based (a poll with no
+/// data doesn't count), so it mirrors the per-guardian uptime figure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationUptime {
+    /// Window start, unix epoch seconds.
+    pub window_start: i64,
+    /// Window end, unix epoch seconds (the query time / "now").
+    pub window_end: i64,
+    /// Total number of guardians in the federation (from its config).
+    pub num_guardians: usize,
+    /// Consensus threshold; the federation is operable when at least this many
+    /// guardians participate.
+    pub threshold: usize,
+    /// Number of polls observed in the window.
+    pub total_polls: i64,
+    /// Number of those polls at which the federation was operable.
+    pub operable_polls: i64,
+    /// Operable fraction as a percentage, `None` when no polls were observed.
+    pub uptime_pct: Option<f64>,
+}
+
 /// A guardian identified by peer id + display name, used to label the series in
 /// [`GuardianLatencySeries`].
 #[derive(Debug, Clone, Serialize, Deserialize)]

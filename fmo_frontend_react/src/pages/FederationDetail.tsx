@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, lazy, Suspense } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { api, authedFetch } from '../services/api';
-import type { FederationSummary } from '../types/api';
+import type { FederationSummary, FederationUptime } from '../types/api';
 import { Badge } from '../components/Badge';
 import { Alert } from '../components/Alert';
 import { Copyable } from '../components/Copyable';
@@ -63,6 +63,34 @@ interface HistogramEntry {
   timestamp?: number;
 }
 
+// Tailwind classes for the federation-uptime badge, keyed on the operable
+// percentage. Semantic (green good / amber warning / red critical), separate
+// from the accent hue.
+function uptimeBadgeClasses(pct: number): string {
+  if (pct >= 99.9) {
+    return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+  }
+  if (pct >= 99) {
+    return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300';
+  }
+  if (pct >= 95) {
+    return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+  }
+  return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
+}
+
+// Show more precision as uptime approaches 100% (99.97% reads better than
+// 100%), but avoid rounding a real outage up to a clean "100%".
+function formatUptimePct(pct: number): string {
+  if (pct >= 99.995) {
+    return '100%';
+  }
+  if (pct >= 99) {
+    return `${pct.toFixed(2)}%`;
+  }
+  return `${pct.toFixed(1)}%`;
+}
+
 export function FederationDetail() {
   const { id } = useParams<{ id: string }>();
   const [federation, setFederation] = useState<FederationSummary | null>(null);
@@ -83,6 +111,7 @@ export function FederationDetail() {
   const [movingAverageWindow, setMovingAverageWindow] = useState<number>(0); // 0 = off, 7 = 7-day, 30 = 30-day
   const [useLogScale, setUseLogScale] = useState(false);
   const [guardianHealth, setGuardianHealth] = useState<Record<string, GuardianHealth>>({});
+  const [uptime, setUptime] = useState<FederationUptime | null>(null);
   const [showTimeline, setShowTimeline] = useState(false);
   
   // Check if at least one guardian is online
@@ -144,6 +173,10 @@ export function FederationDetail() {
         fetchUTXOs(id);
         fetchHistogram(id);
         fetchGuardianHealth(id);
+        api
+          .getFederationUptime(id)
+          .then(setUptime)
+          .catch((err) => console.error('Failed to fetch federation uptime:', err));
       })
       .catch((err) => {
         console.error('Failed to fetch federation details:', err);
@@ -354,14 +387,30 @@ export function FederationDetail() {
         {/* Guardians Panel */}
         <div className="lg:col-span-2 bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
           <div className="flex items-start justify-between gap-3 mb-3 sm:mb-4">
-            <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
-              Guardians
-              {config && (
-                <span className="ml-2 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
-                  {config.guardians.length} of {config.guardians.length} Federation
+            <div className="flex items-center gap-2 flex-wrap min-w-0">
+              <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
+                Guardians
+                {config && (
+                  <span className="ml-2 text-xs sm:text-sm font-normal text-gray-500 dark:text-gray-400">
+                    {config.guardians.length} of {config.guardians.length} Federation
+                  </span>
+                )}
+              </h2>
+              {uptime && uptime.uptime_pct !== null && (
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${uptimeBadgeClasses(
+                    uptime.uptime_pct
+                  )}`}
+                  title={`Federation operable (at least ${uptime.threshold} of ${
+                    uptime.num_guardians
+                  } guardians participating) ${uptime.uptime_pct.toFixed(
+                    2
+                  )}% of the last 30 days (${uptime.operable_polls.toLocaleString()} of ${uptime.total_polls.toLocaleString()} checks). Accounts for offline and lagging guardians.`}
+                >
+                  {formatUptimePct(uptime.uptime_pct)} uptime
                 </span>
               )}
-            </h2>
+            </div>
             {config && config.guardians.length > 0 && (
               <button
                 onClick={() => setShowTimeline((v) => !v)}

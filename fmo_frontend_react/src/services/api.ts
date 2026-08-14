@@ -2,6 +2,7 @@ import type {
   ConsensusPage,
   FedimintTotals,
   FederationSummary,
+  FederationUptime,
   GatewayInfo,
   GuardianLatencySeries,
   GuardianTimeline,
@@ -156,6 +157,14 @@ export const api = {
         window,
         despike: despike ? undefined : 'false',
       })}`
+    ),
+
+  // Threshold-aware federation uptime over the given window (default 30d): the
+  // fraction of health polls at which the federation was operable (>= threshold
+  // participating guardians).
+  getFederationUptime: (federationId: string, window: string = '30d') =>
+    request<FederationUptime>(
+      `/federations/${federationId}/health/uptime${toQueryString({ window })}`
     ),
 
   // Guardian API-latency time series over the given window (7d | 30d; backend

@@ -83,6 +83,18 @@ export interface GuardianTimeline {
   inoperable_intervals: TimeInterval[];
 }
 
+/// Threshold-aware federation uptime: fraction of health polls at which at
+/// least `threshold` guardians were participating (operable), over a window.
+export interface FederationUptime {
+  window_start: number;
+  window_end: number;
+  num_guardians: number;
+  threshold: number;
+  total_polls: number;
+  operable_polls: number;
+  uptime_pct: number | null;
+}
+
 /// A guardian identified by peer id + display name (labels latency series).
 export interface GuardianRef {
   guardian_id: number;
