@@ -7,6 +7,9 @@ use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::endpoint_constants::STATUS_ENDPOINT;
 use fedimint_core::module::ApiRequestErased;
+use fedimint_core::net::api_announcement::SignedApiAnnouncement;
+use fedimint_core::secp256k1::PublicKey;
+use fedimint_core::util::SafeUrl;
 use fedimint_core::{NumPeers, PeerId};
 use fmo_api_types::{
     FederationHealth, GuardianHealth, GuardianHealthLatest, GuardianLane, GuardianTimeline,
@@ -30,15 +33,29 @@ impl FederationObserver {
         config: ClientConfig,
     ) -> anyhow::Result<()> {
         const REQUEST_INTERVAL: Duration = Duration::from_secs(60);
+        // API-URL announcements change rarely, so refresh them only every ~10
+        // polls (~10 min) rather than on the 60s health cadence.
+        const ANNOUNCEMENT_REFRESH_POLLS: u64 = 10;
 
         let mut interval = tokio::time::interval(REQUEST_INTERVAL);
-        let peers = config
+
+        // Base (consensus config) API URLs, plus the guardian identity keys that
+        // sign API-URL announcements. Without the keys (very old 0.3.x configs)
+        // we can't verify announcements, so override tracking is skipped and we
+        // poll the config URLs directly.
+        let cfg_urls: BTreeMap<PeerId, SafeUrl> = config
             .global
             .api_endpoints
             .iter()
             .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone()))
             .collect();
-        let api = DynGlobalApi::new(self.connectors().clone(), peers, None)?;
+        let broadcast_pub_keys = config.global.broadcast_public_keys.clone();
+
+        // Effective URLs = config URLs overridden by any tracked announcements.
+        // Rebuilt below whenever a guardian rotates its endpoint.
+        let mut effective_urls = self.effective_api_urls(federation_id, &cfg_urls).await?;
+        let mut api = DynGlobalApi::new(self.connectors().clone(), effective_urls.clone(), None)?;
+        let mut poll_count: u64 = 0;
 
         // The v1 wallet module's `block_count_local` endpoint doubles as a warm
         // per-peer latency probe and a bitcoin block-height source. Federations
@@ -55,6 +72,43 @@ impl FederationObserver {
 
         loop {
             interval.tick().await;
+
+            // Periodically refresh signed API-URL announcements and, if a
+            // guardian rotated its endpoint, rebuild `api` so we poll the
+            // current URL instead of a stale (dead) config URL. Best-effort:
+            // any failure just leaves the previous effective URLs in place.
+            if poll_count.is_multiple_of(ANNOUNCEMENT_REFRESH_POLLS) {
+                if let Some(pub_keys) = &broadcast_pub_keys {
+                    if let Err(e) = self
+                        .refresh_api_announcements(federation_id, &api, &cfg_urls, pub_keys)
+                        .await
+                    {
+                        tracing::debug!(
+                            "API announcement refresh failed for {federation_id}: {e:?}"
+                        );
+                    }
+                    match self.effective_api_urls(federation_id, &cfg_urls).await {
+                        Ok(new_urls) if new_urls != effective_urls => {
+                            tracing::info!(
+                                "guardian API URLs changed for {federation_id}, rebuilding api client"
+                            );
+                            effective_urls = new_urls;
+                            api = DynGlobalApi::new(
+                                self.connectors().clone(),
+                                effective_urls.clone(),
+                                None,
+                            )?;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                "reading tracked API URLs failed for {federation_id}: {e:?}"
+                            )
+                        }
+                    }
+                }
+            }
+            poll_count = poll_count.wrapping_add(1);
 
             let peer_status_responses =
                 join_all(config.global.api_endpoints.keys().map(|&peer_id| {
@@ -131,6 +185,110 @@ impl FederationObserver {
             }
             dbtx.commit().await?;
         }
+    }
+
+    /// The effective API URL per guardian: the config URL, overridden by the
+    /// highest-nonce tracked announcement (`guardian_api_announcements`) where
+    /// one exists. Public for tests; the health monitor is the real caller.
+    pub async fn effective_api_urls(
+        &self,
+        federation_id: FederationId,
+        cfg_urls: &BTreeMap<PeerId, SafeUrl>,
+    ) -> anyhow::Result<BTreeMap<PeerId, SafeUrl>> {
+        #[derive(FromRow)]
+        struct AnnouncementRow {
+            guardian_id: i32,
+            api_url: String,
+        }
+
+        let rows = query::<AnnouncementRow>(
+            &self.connection().await?,
+            "SELECT guardian_id, api_url FROM guardian_api_announcements WHERE federation_id = $1",
+            &[&federation_id.consensus_encode_to_vec()],
+        )
+        .await?;
+
+        let mut urls = cfg_urls.clone();
+        for row in rows {
+            match SafeUrl::parse(&row.api_url) {
+                // Only override peers that exist in the config; ignore a stored
+                // URL that no longer parses.
+                Ok(url) => {
+                    let peer = PeerId::new(row.guardian_id as u16);
+                    if urls.contains_key(&peer) {
+                        urls.insert(peer, url);
+                    }
+                }
+                Err(e) => tracing::debug!("stored API URL '{}' is invalid: {e:?}", row.api_url),
+            }
+        }
+        Ok(urls)
+    }
+
+    /// Fetches signed API-URL announcements from any reachable guardian (the
+    /// returned map covers all peers, so one responsive guardian suffices to
+    /// learn another's rotated URL), verifies each against the announcing
+    /// guardian's identity key, and records the highest-nonce URL per guardian
+    /// in `guardian_api_announcements`.
+    async fn refresh_api_announcements(
+        &self,
+        federation_id: FederationId,
+        api: &DynGlobalApi,
+        cfg_urls: &BTreeMap<PeerId, SafeUrl>,
+        broadcast_pub_keys: &BTreeMap<PeerId, PublicKey>,
+    ) -> anyhow::Result<()> {
+        // Try guardians in turn until one returns the announcement map.
+        let mut announcements: Option<BTreeMap<PeerId, SignedApiAnnouncement>> = None;
+        for &peer_id in cfg_urls.keys() {
+            match api.api_announcements(peer_id).await {
+                Ok(map) => {
+                    announcements = Some(map);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("api_announcements from peer {peer_id} failed: {e:?}")
+                }
+            }
+        }
+        let announcements = announcements.context("no guardian returned API announcements")?;
+
+        let secp = fedimint_core::secp256k1::Secp256k1::verification_only();
+        let conn = self.connection().await?;
+        let now = chrono::Utc::now().naive_utc();
+        let fed = federation_id.consensus_encode_to_vec();
+
+        for (peer_id, signed) in announcements {
+            // Reject announcements not signed by the announcing guardian's own
+            // identity key — a peer must not be able to redirect another's URL.
+            let Some(pub_key) = broadcast_pub_keys.get(&peer_id) else {
+                continue;
+            };
+            if !signed.verify(&secp, pub_key) {
+                tracing::warn!(
+                    "invalid API announcement for peer {peer_id} of {federation_id}, ignoring"
+                );
+                continue;
+            }
+
+            let url = signed.api_announcement.api_url.to_string();
+            let nonce = signed.api_announcement.nonce as i64;
+            // Upsert only when this announcement is newer (higher nonce) than
+            // what we have tracked, so a replayed older announcement can't
+            // downgrade the URL.
+            conn.execute(
+                "INSERT INTO guardian_api_announcements
+                     (federation_id, guardian_id, api_url, nonce, updated_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (federation_id, guardian_id) DO UPDATE SET
+                     api_url = EXCLUDED.api_url,
+                     nonce = EXCLUDED.nonce,
+                     updated_at = EXCLUDED.updated_at
+                 WHERE EXCLUDED.nonce > guardian_api_announcements.nonce",
+                &[&fed, &(peer_id.to_usize() as i32), &url, &nonce, &now],
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn get_guardian_health(

@@ -1120,3 +1120,74 @@ async fn guardian_latency_series_and_quorum_line() {
     );
     assert_eq!(series.buckets[2].quorum_ms, None);
 }
+
+/// A tracked API-URL announcement overrides the guardian's config URL that the
+/// health monitor polls; guardians without an announcement keep their config
+/// URL, and a stored row for an unknown peer is ignored.
+#[tokio::test]
+async fn effective_api_urls_apply_tracked_overrides() {
+    use fedimint_core::util::SafeUrl;
+    use fedimint_core::PeerId;
+
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, federation_id) = multi_guardian_config(3);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let cfg_urls: std::collections::BTreeMap<PeerId, SafeUrl> = config
+        .global
+        .api_endpoints
+        .iter()
+        .map(|(&peer, peer_url)| (peer, peer_url.url.clone()))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    // Guardian 1 rotated its endpoint (tracked override).
+    conn.execute(
+        "INSERT INTO guardian_api_announcements (federation_id, guardian_id, api_url, nonce, updated_at)
+         VALUES ($1, 1, 'wss://new-guardian-1.example.com/', 3, now())",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    // Stored row for a peer not in the config is ignored, not surfaced.
+    conn.execute(
+        "INSERT INTO guardian_api_announcements (federation_id, guardian_id, api_url, nonce, updated_at)
+         VALUES ($1, 99, 'wss://ghost.example.com/', 1, now())",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let effective = observer
+        .effective_api_urls(federation_id, &cfg_urls)
+        .await
+        .unwrap();
+
+    // Guardian 1 uses the overridden URL; guardians 0 and 2 keep config URLs.
+    assert_eq!(
+        effective[&PeerId::from(1)],
+        SafeUrl::parse("wss://new-guardian-1.example.com/").unwrap()
+    );
+    assert_eq!(effective[&PeerId::from(0)], cfg_urls[&PeerId::from(0)]);
+    assert_eq!(effective[&PeerId::from(2)], cfg_urls[&PeerId::from(2)]);
+    // The unknown peer is not introduced.
+    assert!(!effective.contains_key(&PeerId::from(99)));
+    assert_eq!(effective.len(), 3);
+}
