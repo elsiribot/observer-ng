@@ -3,7 +3,7 @@
 //! per-federation background task, tables live in the `fmo_ln` schema and
 //! payment activity metrics are computed from the modular tables.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context};
 use axum::extract::{Path, Query, State};
@@ -20,10 +20,11 @@ use fmo_core::api::ModuleApiState;
 use fmo_core::gateway_poll::{self, GatewaySource, PolledGateway};
 use fmo_core::module::ModuleTaskCtx;
 use fmo_core::query::query;
+use fmo_core::services::meta::{json_config_from_kinds, MetaFields, MetaFieldsExt};
 use futures::future::join_all;
 use serde::Deserialize;
 use tokio_postgres::Transaction;
-use tracing::warn;
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum GatewayMetricsWindow {
@@ -67,6 +68,18 @@ impl GatewayMetricsWindow {
             Self::D90 => chrono::Duration::days(90),
         }
     }
+}
+
+/// The set of vetted `gateway_id`s designated by a federation's merged meta,
+/// read from `vetted_gateways` (a JSON array of hex gateway ids) or the legacy
+/// `fedi:vetted_gateways` fallback. Entries that don't match a known gateway
+/// are simply never looked up.
+fn vetted_gateway_ids(meta: &MetaFields) -> HashSet<String> {
+    meta.get_as::<Vec<String>>("vetted_gateways")
+        .or_else(|| meta.get_as::<Vec<String>>("fedi:vetted_gateways"))
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
 /// The LNv1 `GatewaySource`: queries every guardian's `LIST_GATEWAYS_ENDPOINT`,
@@ -167,6 +180,27 @@ impl GatewaySource for LnGatewaySource {
     ) -> anyhow::Result<()> {
         let federation_id_bytes = ctx.federation_id.consensus_encode_to_vec();
 
+        // A gateway is vetted if the registry flag says so OR the federation's
+        // merged meta lists its `gateway_id` under `vetted_gateways` (or the
+        // legacy `fedi:vetted_gateways`). The registry flag is ~always false in
+        // practice; federations designate vetted gateways via the meta key,
+        // often supplied through a meta override file. Fetch the set once per
+        // poll; on any meta error fall back to the registry flag alone.
+        let vetted_set: HashSet<String> = match ctx
+            .services
+            .merged_meta(&json_config_from_kinds(&ctx.config))
+            .await
+        {
+            Ok(meta) => vetted_gateway_ids(&meta),
+            Err(e) => {
+                debug!(
+                    "merged_meta unavailable for {}: {e:?}; using registry vetted flags only",
+                    ctx.federation_id
+                );
+                HashSet::new()
+            }
+        };
+
         let mut gateway_ids = Vec::with_capacity(fetched.len());
         let mut node_pub_keys = Vec::with_capacity(fetched.len());
         let mut api_endpoints = Vec::with_capacity(fetched.len());
@@ -179,7 +213,7 @@ impl GatewaySource for LnGatewaySource {
             node_pub_keys.push(gw.info.node_pub_key.to_string());
             api_endpoints.push(gw.info.api.to_string());
             lightning_aliases.push(gw.info.lightning_alias.clone());
-            vetted_flags.push(gw.vetted);
+            vetted_flags.push(gw.vetted || vetted_set.contains(gateway_id));
             raw_announcements.push(serde_json::to_string(gw)?);
         }
 
@@ -492,4 +526,68 @@ async fn list_federation_gateways(
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use fmo_core::services::meta::MetaFields;
+
+    use super::vetted_gateway_ids;
+
+    #[test]
+    fn reads_vetted_gateways_key() {
+        // Merged meta arrives already parsed, so the value is a JSON array of
+        // hex gateway ids (matching the `gateway_id` map key).
+        let mut meta = MetaFields::new();
+        meta.insert(
+            "vetted_gateways".to_owned(),
+            serde_json::json!(["aaa", "bbb"]),
+        );
+        meta.insert("federation_name".to_owned(), serde_json::json!("Test"));
+
+        let set = vetted_gateway_ids(&meta);
+        assert!(set.contains("aaa"));
+        assert!(set.contains("bbb"));
+        assert!(!set.contains("ccc"));
+    }
+
+    #[test]
+    fn falls_back_to_fedi_prefixed_key() {
+        let mut meta = MetaFields::new();
+        meta.insert(
+            "fedi:vetted_gateways".to_owned(),
+            serde_json::json!(["zzz"]),
+        );
+
+        let set = vetted_gateway_ids(&meta);
+        assert!(set.contains("zzz"));
+    }
+
+    #[test]
+    fn prefers_unprefixed_key_over_fedi_fallback() {
+        let mut meta = MetaFields::new();
+        meta.insert("vetted_gateways".to_owned(), serde_json::json!(["aaa"]));
+        meta.insert(
+            "fedi:vetted_gateways".to_owned(),
+            serde_json::json!(["zzz"]),
+        );
+
+        let set = vetted_gateway_ids(&meta);
+        assert!(set.contains("aaa"));
+        assert!(!set.contains("zzz"));
+    }
+
+    #[test]
+    fn empty_when_absent_or_malformed() {
+        assert!(vetted_gateway_ids(&MetaFields::new()).is_empty());
+
+        // Wrong shape (not an array of strings) yields an empty set rather than
+        // an error.
+        let mut meta = MetaFields::new();
+        meta.insert(
+            "vetted_gateways".to_owned(),
+            serde_json::json!("not-an-array"),
+        );
+        assert!(vetted_gateway_ids(&meta).is_empty());
+    }
 }
