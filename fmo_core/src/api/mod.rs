@@ -198,6 +198,15 @@ impl FederationObserver {
             Err(e) => debug!("Error while refreshing cached totals: {e:?}"),
         }
 
+        // Refresh the fleet-wide federation-summary list (the home page).
+        // Depends on the guardian-health cache refreshed above, so it runs
+        // last. Best-effort: the handler falls back to computing on demand if
+        // the cache is empty.
+        match self.compute_federation_summaries().await {
+            Ok(summaries) => *self.cached_federation_summaries().write().await = Some(summaries),
+            Err(e) => debug!("Error while refreshing cached federation summaries: {e:?}"),
+        }
+
         Ok(())
     }
 }

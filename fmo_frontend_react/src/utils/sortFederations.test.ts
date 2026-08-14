@@ -22,6 +22,7 @@ function fed(
     health: 'online',
     total_volume: overrides.total_volume ?? 0,
     total_tx_count: overrides.total_tx_count ?? 0,
+    uptime_pct: overrides.uptime_pct ?? null,
   };
 }
 
@@ -71,6 +72,27 @@ describe('sortFederations', () => {
     expect(ids(sortFederations([withVotes, noVotes], 'reputation', 'asc'))).toEqual([
       'voted',
       'unvoted',
+    ]);
+  });
+
+  it('sorts by uptime, highest first, nulls last regardless of direction', () => {
+    const high = fed({ id: 'high', uptime_pct: 99.9 });
+    const low = fed({ id: 'low', uptime_pct: 47.0 });
+    const mid = fed({ id: 'mid', uptime_pct: 88.0 });
+    const none = fed({ id: 'none', uptime_pct: null });
+
+    expect(ids(sortFederations([low, none, high, mid], 'uptime', 'desc'))).toEqual([
+      'high',
+      'mid',
+      'low',
+      'none',
+    ]);
+    // Ascending flips the ranked feds but keeps the no-sample fed last.
+    expect(ids(sortFederations([high, none, low, mid], 'uptime', 'asc'))).toEqual([
+      'low',
+      'mid',
+      'high',
+      'none',
     ]);
   });
 

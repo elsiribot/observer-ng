@@ -1,7 +1,7 @@
 import type { FederationSummary } from '../types/api';
 import { ratingIndex } from './format';
 
-export type SortKey = 'reputation' | 'volume' | 'balance' | 'tx_count' | 'name';
+export type SortKey = 'reputation' | 'uptime' | 'volume' | 'balance' | 'tx_count' | 'name';
 export type SortDirection = 'asc' | 'desc';
 
 // Default sort matches what the home page has always shown: federations ranked
@@ -16,6 +16,7 @@ export const SORT_OPTIONS: {
   defaultDirection: SortDirection;
 }[] = [
   { key: 'reputation', label: 'Reputation', defaultDirection: 'desc' },
+  { key: 'uptime', label: 'Uptime', defaultDirection: 'desc' },
   { key: 'volume', label: 'Volume', defaultDirection: 'desc' },
   { key: 'balance', label: 'Balance', defaultDirection: 'desc' },
   { key: 'tx_count', label: 'Tx Count', defaultDirection: 'desc' },
@@ -74,6 +75,17 @@ export function compareFederations(
     if (as === null) return 1;
     if (bs === null) return -1;
     return (as - bs) * dir;
+  }
+
+  if (key === 'uptime') {
+    const au = a.uptime_pct;
+    const bu = b.uptime_pct;
+    // Federations with no health samples yet sink to the bottom no matter the
+    // direction, like no-vote federations under `reputation`.
+    if (au === null && bu === null) return 0;
+    if (au === null) return 1;
+    if (bu === null) return -1;
+    return (au - bu) * dir;
   }
 
   return (numericMetric(a, key) - numericMetric(b, key)) * dir;

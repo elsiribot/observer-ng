@@ -225,6 +225,7 @@ export function Home() {
                 totalAssets={fed.deposits}
                 health={fed.health}
                 activityData={fed.last_7d_activity}
+                uptime={fed.uptime_pct}
                 maxTransaction={globalMaxTransaction}
                 maxVolume={globalMaxVolume}
               />
@@ -291,6 +292,7 @@ export function Home() {
                     totalAssets={fed.deposits}
                     health={fed.health}
                     activityData={fed.last_7d_activity}
+                    uptime={fed.uptime_pct}
                     maxTransaction={globalMaxTransaction}
                     maxVolume={globalMaxVolume}
                   />

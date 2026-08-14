@@ -53,6 +53,15 @@ pub struct FederationObserver {
             Option<std::collections::BTreeMap<FederationId, fmo_api_types::FederationHealth>>,
         >,
     >,
+    /// Cached fleet-wide federation summaries (the home-page list), refreshed
+    /// on the same cycle as the materialized views (`refresh_views_inner`).
+    /// Building this list fans a handful of per-federation queries (assets,
+    /// all-time totals, activity, rating and the 30-day uptime scan) across
+    /// every federation, so it must not run on every home-page load; serve it
+    /// from cache instead. `None` until the first refresh cycle completes
+    /// (callers fall back to computing on demand).
+    cached_federation_summaries:
+        Arc<tokio::sync::RwLock<Option<Vec<fmo_api_types::FederationSummary>>>>,
 }
 
 impl FederationObserver {
@@ -116,6 +125,7 @@ impl FederationObserver {
             live_states: Arc::new(Mutex::new(HashMap::new())),
             cached_totals: Arc::new(tokio::sync::RwLock::new(None)),
             cached_health_summary: Arc::new(tokio::sync::RwLock::new(None)),
+            cached_federation_summaries: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Ok(observer)
@@ -205,6 +215,12 @@ impl FederationObserver {
         >,
     > {
         &self.cached_health_summary
+    }
+
+    pub(crate) fn cached_federation_summaries(
+        &self,
+    ) -> &Arc<tokio::sync::RwLock<Option<Vec<fmo_api_types::FederationSummary>>>> {
+        &self.cached_federation_summaries
     }
 
     /// Live-poll watermark receiver for `federation_id`, if its fetcher has

@@ -6,6 +6,7 @@ import { Badge } from './Badge';
 import { Rating } from './Rating';
 const CombinedMiniChart = React.lazy(() => import('./MiniChart').then((m) => ({ default: m.CombinedMiniChart })));
 import { asBitcoin } from '../utils/format';
+import { uptimeBadgeClasses, formatUptimePct } from '../utils/uptime';
 
 interface ActivityData {
   num_transactions: number;
@@ -19,6 +20,7 @@ interface FederationRowProps {
   totalAssets: number;
   health: FederationHealth;
   activityData: ActivityData[];
+  uptime?: number | null;    // threshold-aware 30d operable uptime (0-100)
   maxTransaction?: number;  // global max for consistent chart scale
   maxVolume?: number;        // global max for consistent chart scale
 }
@@ -30,6 +32,7 @@ export function FederationRow({
   totalAssets,
   health,
   activityData,
+  uptime,
   maxTransaction,
   maxVolume,
 }: FederationRowProps) {
@@ -55,6 +58,18 @@ export function FederationRow({
   const badgeLevel = health === 'degraded' ? 'warning' : 'error';
   const healthMessage = showWarning ? HEALTH_MESSAGES[health] : '';
 
+  // Threshold-aware 30d uptime badge, mirroring the federation-detail page.
+  // Hidden when there are no health samples yet (uptime null/undefined).
+  const uptimeBadge =
+    uptime === null || uptime === undefined ? null : (
+      <span
+        className={`inline-flex items-center shrink-0 px-1.5 py-0.5 rounded-full text-[10px] sm:text-xs font-medium ${uptimeBadgeClasses(uptime)}`}
+        title={`Federation operable ${uptime.toFixed(2)}% of the last 30 days (threshold-aware; accounts for offline and lagging guardians)`}
+      >
+        {formatUptimePct(uptime)}
+      </span>
+    );
+
   return (
     <Link 
       to={`/federations/${id}`}
@@ -67,11 +82,12 @@ export function FederationRow({
           {/* Name */}
           <div className="font-medium text-gray-900 dark:text-white min-w-0">
             <span className="text-[10px] uppercase text-gray-600 dark:text-gray-400 block mb-1">Name</span>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <span className="font-medium text-gray-900 dark:text-white break-words">
                 {name}
               </span>
               {showWarning && <Badge level={badgeLevel} tooltip={healthMessage} showIcon>{''}</Badge>}
+              {uptimeBadge}
             </div>
           </div>
 
@@ -108,11 +124,12 @@ export function FederationRow({
       <div className="hidden md:grid md:grid-cols-4 md:gap-3">
         {/* Name */}
         <div className="font-medium text-gray-900 dark:text-white">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <span className="font-medium text-gray-900 dark:text-white break-words">
               {name}
             </span>
             {showWarning && <Badge level={badgeLevel} tooltip={healthMessage} showIcon>{''}</Badge>}
+            {uptimeBadge}
           </div>
         </div>
 

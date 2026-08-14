@@ -17,6 +17,9 @@ export interface FederationSummary {
   total_volume: number;
   // All-time fedimint-transaction count. 0 when no rows yet.
   total_tx_count: number;
+  // Threshold-aware operable uptime over the last 30 days (0-100), or null when
+  // there are no health samples yet. Mirrors the badge on the detail page.
+  uptime_pct: number | null;
 }
 
 export interface FederationRating {

@@ -26,6 +26,12 @@ pub struct FederationSummary {
     /// All-time fedimint-transaction count, from the `federation_tx_daily`
     /// matview. `0` for federations with no rows yet.
     pub total_tx_count: u64,
+    /// Threshold-aware federation uptime over the last 30 days: the percentage
+    /// of health polls at which at least `threshold` guardians were
+    /// participating (online AND caught up). `None` when there are no health
+    /// samples yet (see [`FederationUptime`] for the full breakdown served by
+    /// the detail endpoint).
+    pub uptime_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

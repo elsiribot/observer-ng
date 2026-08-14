@@ -303,7 +303,30 @@ async fn backfill_federation(
 }
 
 impl FederationObserver {
+    /// Returns the cached fleet-wide federation summaries (the home-page list),
+    /// refreshed on the matview refresh cycle (see `refresh_views_inner`).
+    /// Before the first refresh cycle completes, computes and caches them on
+    /// demand so a freshly started process still serves the list immediately.
+    /// This is the hottest page's payload and each build fans several
+    /// per-federation queries across the whole fleet, so it must be served from
+    /// cache rather than recomputed per request.
     pub async fn list_federation_summaries(&self) -> anyhow::Result<Vec<FederationSummary>> {
+        if let Some(summaries) = self.cached_federation_summaries().read().await.clone() {
+            return Ok(summaries);
+        }
+
+        let summaries = self.compute_federation_summaries().await?;
+        *self.cached_federation_summaries().write().await = Some(summaries.clone());
+        Ok(summaries)
+    }
+
+    /// Computes the fleet-wide federation summaries from scratch. Expensive:
+    /// fans a handful of per-federation queries (assets, all-time totals,
+    /// activity, rating and the 30-day uptime scan) across every federation.
+    /// Called on the matview refresh cycle (`refresh_views_inner`) and, as a
+    /// fallback, by [`Self::list_federation_summaries`] before the cache is
+    /// warm.
+    pub async fn compute_federation_summaries(&self) -> anyhow::Result<Vec<FederationSummary>> {
         let federations = self.list_federations().await?;
 
         // Fetch the fleet-wide guardian health ONCE and share it across every
@@ -377,6 +400,16 @@ impl FederationObserver {
             .federation_activity(federation.federation_id, 7)
             .await?;
 
+        // Threshold-aware operable uptime over the last 30 days, matching the
+        // badge on the federation-detail page. `None` when there are no health
+        // samples yet. This is the expensive part of the summary (a 30-day scan
+        // of `guardian_health`), which is why the fleet list is cached and
+        // rebuilt off the request path (see `list_federation_summaries`).
+        let uptime_pct = self
+            .federation_uptime(federation.federation_id, chrono::Duration::days(30))
+            .await?
+            .uptime_pct;
+
         let (first_peer_id, first_peer_url) = federation
             .config
             .global
@@ -401,6 +434,7 @@ impl FederationObserver {
             health,
             total_volume,
             total_tx_count,
+            uptime_pct,
         })
     }
 
