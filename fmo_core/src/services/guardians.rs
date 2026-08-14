@@ -363,10 +363,15 @@ impl FederationObserver {
     /// Both interval sets are computed with gap-and-islands SQL over
     /// `guardian_health` rather than shipping raw samples to Rust; guardians
     /// are almost always online so the resulting interval set is small.
+    ///
+    /// When `despike` is false, the single-poll false-positive filtering is
+    /// disabled and every raw missed/lagging poll is shown as an interval — the
+    /// opt-out for users who want to see unfiltered samples.
     pub async fn get_guardian_timeline(
         &self,
         federation_id: FederationId,
         window: chrono::Duration,
+        despike: bool,
     ) -> anyhow::Result<GuardianTimeline> {
         let federation = self
             .get_federation(federation_id)
@@ -433,17 +438,18 @@ impl FederationObserver {
                         END AS raw_state
                  FROM tipped
              ),
-             -- Despike single-poll false positives per channel: a lone poll in
-             -- an abnormal state whose immediate neighbours were both NOT in
-             -- that state is a transient blip, reclassified to normal. Runs of
-             -- >=2 consecutive abnormal polls are untouched.
+             -- Despike single-poll false positives per channel (when $4): a lone
+             -- poll in an abnormal state whose immediate neighbours were both
+             -- NOT in that state is a transient blip, reclassified to normal.
+             -- Runs of >=2 consecutive abnormal polls are untouched. With $4
+             -- false the despike is disabled and raw states pass through.
              despiked AS (
                  SELECT guardian_id, time,
-                        CASE WHEN raw_state = 'offline'
+                        CASE WHEN $4 AND raw_state = 'offline'
                                   AND LAG(raw_state = 'offline') OVER w = false
                                   AND LEAD(raw_state = 'offline') OVER w = false
                              THEN false ELSE raw_state = 'offline' END AS off,
-                        CASE WHEN raw_state = 'lagging'
+                        CASE WHEN $4 AND raw_state = 'lagging'
                                   AND LAG(raw_state = 'lagging') OVER w = false
                                   AND LEAD(raw_state = 'lagging') OVER w = false
                              THEN false ELSE raw_state = 'lagging' END AS lag
@@ -497,7 +503,7 @@ impl FederationObserver {
              FROM grouped
              GROUP BY guardian_id, kind, grp
              ORDER BY guardian_id, kind, start_time",
-            &[&fed, &window_start, &window_end],
+            &[&fed, &window_start, &window_end, &despike],
         )
         .await?;
 
@@ -568,7 +574,8 @@ impl FederationObserver {
              despiked AS (
                  SELECT time,
                         CASE
-                            WHEN NOT participating
+                            WHEN $5
+                                 AND NOT participating
                                  AND LAG(participating) OVER w = true
                                  AND LEAD(participating) OVER w = true
                             THEN true
@@ -614,7 +621,13 @@ impl FederationObserver {
              FROM grouped
              GROUP BY grp
              ORDER BY start_time",
-            &[&fed, &window_start, &window_end, &(threshold as i64)],
+            &[
+                &fed,
+                &window_start,
+                &window_end,
+                &(threshold as i64),
+                &despike,
+            ],
         )
         .await?;
 

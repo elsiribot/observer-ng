@@ -684,7 +684,7 @@ async fn guardian_timeline_computes_offline_and_inoperable_intervals() {
     .unwrap();
 
     let timeline = observer
-        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), true)
         .await
         .unwrap();
 
@@ -768,7 +768,7 @@ async fn guardian_timeline_ongoing_outage_extends_to_window_end() {
 
     let before_end = chrono::Utc::now().timestamp();
     let timeline = observer
-        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), true)
         .await
         .unwrap();
     let after_end = chrono::Utc::now().timestamp();
@@ -830,7 +830,7 @@ async fn guardian_timeline_guardian_without_samples_has_empty_lane() {
     .unwrap();
 
     let timeline = observer
-        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), true)
         .await
         .unwrap();
 
@@ -890,7 +890,7 @@ async fn guardian_timeline_despikes_single_poll_blips() {
     .unwrap();
 
     let timeline = observer
-        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), true)
         .await
         .unwrap();
     let epoch = |ndt: chrono::NaiveDateTime| ndt.and_utc().timestamp();
@@ -915,6 +915,20 @@ async fn guardian_timeline_despikes_single_poll_blips() {
         timeline.inoperable_intervals.is_empty(),
         "a despiked blip must not fabricate an inoperable window"
     );
+
+    // Opt out of despiking: the raw single-poll blip now shows as an offline
+    // interval [t2, t3), and at t2 the raw online count (2 < threshold 3) marks
+    // the federation inoperable across [t2, t3).
+    let raw = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), false)
+        .await
+        .unwrap();
+    assert_eq!(raw.guardians[2].offline_intervals.len(), 1);
+    assert_eq!(raw.guardians[2].offline_intervals[0].start, epoch(t[2]));
+    assert_eq!(raw.guardians[2].offline_intervals[0].end, epoch(t[3]));
+    assert_eq!(raw.inoperable_intervals.len(), 1);
+    assert_eq!(raw.inoperable_intervals[0].start, epoch(t[2]));
+    assert_eq!(raw.inoperable_intervals[0].end, epoch(t[3]));
 }
 
 /// A guardian that responds but reports a `session_count` far behind its peers
@@ -970,7 +984,7 @@ async fn guardian_timeline_flags_lagging_guardians() {
     .unwrap();
 
     let timeline = observer
-        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1), true)
         .await
         .unwrap();
     let epoch = |ndt: chrono::NaiveDateTime| ndt.and_utc().timestamp();

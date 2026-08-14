@@ -68,6 +68,9 @@ interface GuardianTimelineProps {
 
 export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
   const [window, setWindow] = useState('30d');
+  // Filtering of transient single-poll false positives is opt-out: on by
+  // default, unchecking shows the raw samples (every blip as an interval).
+  const [filterBlips, setFilterBlips] = useState(true);
   const [data, setData] = useState<GuardianTimelineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +80,7 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
     setLoading(true);
     setError(null);
     api
-      .getGuardianTimeline(federationId, window)
+      .getGuardianTimeline(federationId, window, filterBlips)
       .then((timeline) => {
         if (!cancelled) {
           setData(timeline);
@@ -93,7 +96,7 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
     return () => {
       cancelled = true;
     };
-  }, [federationId, window]);
+  }, [federationId, window, filterBlips]);
 
   const windowSelector = (
     <div className="flex gap-1" role="group" aria-label="Timeline window">
@@ -126,7 +129,21 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
           </>
         )}
       </div>
-      {windowSelector}
+      <div className="flex items-center gap-3">
+        <label
+          className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none"
+          title="Hide transient single-poll blips (a lone missed or lagging poll bracketed by healthy ones). Uncheck to see raw samples."
+        >
+          <input
+            type="checkbox"
+            className="rounded border-gray-300 dark:border-gray-600"
+            checked={filterBlips}
+            onChange={(e) => setFilterBlips(e.target.checked)}
+          />
+          Filter transient blips
+        </label>
+        {windowSelector}
+      </div>
     </div>
   );
 

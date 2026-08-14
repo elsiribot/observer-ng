@@ -146,11 +146,15 @@ export const api = {
   },
 
   // Guardian outage timeline over the given window (7d | 30d; backend default
-  // 30d): per-guardian offline intervals plus federation-wide inoperable
-  // (quorum-lost) intervals.
-  getGuardianTimeline: (federationId: string, window: string = '30d') =>
+  // 30d): per-guardian offline + lagging intervals plus federation-wide
+  // inoperable (quorum-lost) intervals. `despike` (default true) filters
+  // transient single-poll false positives; pass false to see raw samples.
+  getGuardianTimeline: (federationId: string, window: string = '30d', despike: boolean = true) =>
     request<GuardianTimeline>(
-      `/federations/${federationId}/health/timeline${toQueryString({ window })}`
+      `/federations/${federationId}/health/timeline${toQueryString({
+        window,
+        despike: despike ? undefined : 'false',
+      })}`
     ),
 };
 

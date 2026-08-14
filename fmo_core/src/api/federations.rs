@@ -157,6 +157,10 @@ async fn get_federation_health(
 #[derive(Deserialize, Debug)]
 struct TimelineParams {
     window: Option<String>,
+    /// Whether to despike transient single-poll false positives. Defaults to
+    /// `true` (filtering on) when omitted; set `?despike=false` to see the raw
+    /// samples, including single-poll blips.
+    despike: Option<bool>,
 }
 
 /// Parses a timeline window label into a duration. Supports `Nd` (days) and
@@ -190,9 +194,10 @@ async fn get_federation_health_timeline(
     State(state): State<AppState>,
 ) -> crate::error::Result<impl IntoResponse> {
     let window = parse_timeline_window(params.window.as_deref())?;
+    let despike = params.despike.unwrap_or(true);
     let timeline = state
         .observer
-        .get_guardian_timeline(federation_id, window)
+        .get_guardian_timeline(federation_id, window, despike)
         .await?;
     Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(timeline)))
 }
