@@ -92,10 +92,15 @@ pub fn build_router(observer: FederationObserver, compat_routes: &[(String, Stri
         );
     }
 
+    // Share the same override cache instance the observer/CoreServices use, so
+    // override meta files are fetched once per URL across API handlers and
+    // module tasks.
+    let meta_override_cache = observer.services().meta_override_cache().clone();
+
     router.layer(CorsLayer::permissive()).with_state(AppState {
         observer,
         federation_config_cache: Default::default(),
-        meta_override_cache: Default::default(),
+        meta_override_cache,
     })
 }
 

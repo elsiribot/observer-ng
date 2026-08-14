@@ -19,7 +19,7 @@ use crate::live::Watermark;
 use crate::module::ModuleTaskCtx;
 use crate::query::{query, query_opt};
 use crate::registry::ModuleRegistry;
-use crate::services::meta::ConsensusMetaCache;
+use crate::services::meta::{ConsensusMetaCache, MetaOverrideCache};
 use crate::services::CoreServices;
 
 /// Module-agnostic observer core: owns the DB pool, the module registry and
@@ -92,14 +92,27 @@ impl FederationObserver {
 
         let connectors = ConnectorRegistry::build_from_client_env()?.bind().await?;
 
+        // Build the meta caches once and share the same instances between the
+        // observer (consensus cache, read by `/summary` etc.), the API state
+        // (override cache, `AppState::meta_override_cache`) and `CoreServices`
+        // (both, exposed to module tasks via `merged_meta`), so meta is fetched
+        // once per federation/URL across all of them.
+        let consensus_meta_cache = ConsensusMetaCache::default();
+        let meta_override_cache = MetaOverrideCache::default();
+
         let observer = FederationObserver {
             pool: pool.clone(),
             registry: Arc::new(registry),
-            services: Arc::new(CoreServices::new(mempool_url.to_owned(), pool)),
+            services: Arc::new(CoreServices::new(
+                mempool_url.to_owned(),
+                pool,
+                consensus_meta_cache.clone(),
+                meta_override_cache,
+            )),
             connectors,
             admin_auth: admin_auth.to_owned(),
             task_group: Default::default(),
-            consensus_meta_cache: Default::default(),
+            consensus_meta_cache,
             live_states: Arc::new(Mutex::new(HashMap::new())),
             cached_totals: Arc::new(tokio::sync::RwLock::new(None)),
             cached_health_summary: Arc::new(tokio::sync::RwLock::new(None)),

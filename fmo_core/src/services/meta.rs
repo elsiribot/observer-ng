@@ -65,6 +65,30 @@ pub fn config_to_json(
     })
 }
 
+/// Builds a minimal [`JsonClientConfig`] carrying only the global config and
+/// module *kinds* (module configs rendered as `null`), without needing module
+/// decoders or the [`ModuleRegistry`].
+///
+/// Sufficient for meta lookups — [`ConsensusMetaCache::fetch_meta_cached`] and
+/// [`crate::services::CoreServices::merged_meta`] only read `global` and locate
+/// the `meta` module by kind — so module background tasks that only hold a
+/// decoded [`ClientConfig`] can reach merged meta without the registry.
+pub fn json_config_from_kinds(config: &ClientConfig) -> JsonClientConfig {
+    JsonClientConfig {
+        global: config.global.clone(),
+        modules: config
+            .modules
+            .iter()
+            .map(|(instance_id, module)| {
+                (
+                    *instance_id,
+                    JsonWithKind::new(module.kind.clone(), serde_json::Value::Null),
+                )
+            })
+            .collect(),
+    }
+}
+
 /// Merges meta fields from different sources
 ///
 /// * `metas` - Meta fields from different sources highest to lowest priority

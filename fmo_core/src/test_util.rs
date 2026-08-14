@@ -73,5 +73,10 @@ pub async fn insert_federation(pool: &Pool, config: &ClientConfig, federation_id
 
 /// Core services instance pointing at a dummy mempool URL.
 pub fn test_services(pool: &Pool) -> Arc<CoreServices> {
-    Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()))
+    Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ))
 }

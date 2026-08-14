@@ -117,7 +117,12 @@ async fn dispatch_processes_and_replays() {
         dbtx.commit().await.unwrap();
     }
 
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
 
     let module: Arc<dyn ObserverModule> = Arc::new(TestModule { kind: "dummy" });
     let registry = ModuleRegistry::new(vec![module]);
@@ -416,7 +421,12 @@ async fn failing_session_stalls_only_its_module_at_the_right_cursor() {
         dbtx.commit().await.unwrap();
     }
 
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
     let poisoned: Arc<dyn ObserverModule> = Arc::new(PoisonedModule);
     let bystander: Arc<dyn ObserverModule> = Arc::new(TestModule { kind: "dummy2" });
     fmo_core::db::migrations::setup_module_schema(&pool, "dummy", 1, poisoned.migrations())

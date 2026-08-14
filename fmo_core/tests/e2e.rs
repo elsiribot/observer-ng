@@ -117,7 +117,12 @@ async fn e2e_pipeline_and_replay_idempotency() {
 
     let (config, federation_id) = dummy_config();
     insert_federation(&pool, &config, federation_id).await;
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
 
     let module = DummyObserver;
     fmo_core::db::migrations::setup_module_schema(

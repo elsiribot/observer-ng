@@ -149,7 +149,12 @@ async fn process_pending_skips_open_session_until_data_is_set() {
     .unwrap();
     drop(conn);
 
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
     let module: Arc<dyn ObserverModule> = Arc::new(TestModule);
     let registry = ModuleRegistry::new(vec![module]);
     fmo_core::db::migrations::setup_module_schema(
@@ -585,7 +590,12 @@ async fn ingest_items_and_dispatch_items_are_start_aware_equivalents() {
     fmo_core::db::migrations::setup_module_schema(&pool, "dummy2", 1, module_dummy2.migrations())
         .await
         .unwrap();
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
 
     let items = two_tx_two_ci_items();
     // Splits the two module CIs across the two `ingest_items`/dispatch

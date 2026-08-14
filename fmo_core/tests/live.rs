@@ -186,7 +186,12 @@ async fn live_process_then_finalize() {
     )
     .await
     .unwrap();
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
 
     // A session's worth of items: one dummy transaction (1 input, 1 output)
     // at item_index 0, followed by one dummy module CI at item_index 1 --
@@ -543,7 +548,12 @@ async fn live_ingest_stamps_synced_at_historical_stays_null() {
 
     // No module registered: we only care about the structural ingest here.
     let registry = ModuleRegistry::new(vec![]);
-    let services = Arc::new(CoreServices::new("http://unused".to_owned(), pool.clone()));
+    let services = Arc::new(CoreServices::new(
+        "http://unused".to_owned(),
+        pool.clone(),
+        Default::default(),
+        Default::default(),
+    ));
 
     // Session 1: ingested live -> synced_at is stamped.
     let live_items = dummy_session(9_001).items;
