@@ -150,6 +150,8 @@ export interface SessionSummary {
   time_source: string | null;
   tx_count: number;
   items_by_kind: Record<string, unknown>;
+  /** Peer ids of guardians that contributed >=1 consensus item, ascending. */
+  guardians: number[];
 }
 
 /// One item (a transaction or a consensus item) within a session's ordered

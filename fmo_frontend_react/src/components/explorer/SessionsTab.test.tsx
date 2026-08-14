@@ -33,6 +33,7 @@ function makeSession(overrides: Partial<SessionSummary> = {}): SessionSummary {
     time_source: null,
     tx_count: 3,
     items_by_kind: { ln: 2, wallet: 1, ignored_not_a_number: { nested: true } },
+    guardians: [0, 1, 2, 3],
     ...overrides,
   };
 }
@@ -73,6 +74,27 @@ describe('SessionsTab', () => {
     expect(link).toHaveAttribute('href', '/federations/fed1/session/100');
 
     expect(api.getSessionPage).toHaveBeenCalledWith('fed1', undefined, expect.any(Number));
+  });
+
+  it('flags a guardian that contributed no CI to a session', async () => {
+    // Session had CIs from guardians 0 and 2 only; the federation has 0..3.
+    vi.mocked(api.getSessionPage).mockResolvedValueOnce([makeSession({ guardians: [0, 2] })]);
+
+    render(
+      <MemoryRouter>
+        <SessionsTab
+          federationId="fed1"
+          guardianNames={{ 0: 'Alice', 1: 'Bob', 2: 'Carol', 3: 'Dave' }}
+        />
+      </MemoryRouter>
+    );
+
+    // Contributing guardians describe their name + "contributed a CI".
+    expect(await screen.findByTitle(/Alice contributed a CI/)).toBeInTheDocument();
+    expect(screen.getByTitle(/Carol contributed a CI/)).toBeInTheDocument();
+    // Missing guardians (1, 3) are flagged as having contributed no CI.
+    expect(screen.getByTitle(/Bob contributed no CI/)).toBeInTheDocument();
+    expect(screen.getByTitle(/Dave contributed no CI/)).toBeInTheDocument();
   });
 
   it('shows "unknown" for a null estimated_time', async () => {

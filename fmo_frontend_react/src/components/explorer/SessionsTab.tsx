@@ -10,13 +10,67 @@ const PAGE_SIZE = 25;
 
 interface SessionsTabProps {
   federationId: string;
+  /** peer id -> guardian display name, for labeling contribution chips and
+   * showing which configured guardians are *missing* from a session. */
+  guardianNames?: Record<number, string>;
+}
+
+// Compact per-guardian contribution chips for one session. When the full
+// guardian set is known (`guardianNames`), every configured guardian gets a
+// chip: solid if it contributed >=1 consensus item this session, red-outlined
+// if it did not (the anomaly worth spotting). Without the guardian set, only
+// the contributing peer ids are listed.
+function GuardianChips({
+  guardians,
+  guardianNames,
+}: {
+  guardians: number[];
+  guardianNames?: Record<number, string>;
+}) {
+  const contributed = new Set(guardians);
+  const ids = guardianNames
+    ? Object.keys(guardianNames)
+        .map(Number)
+        .sort((a, b) => a - b)
+    : guardians;
+
+  if (ids.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="flex gap-0.5 flex-wrap items-center">
+      {ids.map((id) => {
+        const present = contributed.has(id);
+        const name = guardianNames?.[id];
+        return (
+          <span
+            key={id}
+            title={
+              name
+                ? `${name} ${present ? 'contributed a CI' : 'contributed no CI'}`
+                : `Guardian ${id} contributed a CI`
+            }
+            className={
+              'inline-flex items-center justify-center min-w-[1.1rem] h-[1.1rem] px-1 rounded text-[10px] font-mono ' +
+              (present
+                ? 'bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200'
+                : 'border border-red-400 text-red-500 dark:border-red-500 dark:text-red-400')
+            }
+          >
+            {id}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 // Infinite-scroll list of a federation's sessions (newest first), keyset
 // paginated via `api.getSessionPage` using the last loaded row's
 // `session_index` as the `before` cursor. Each row links to the
 // session-detail page for drilling into that session's items.
-export function SessionsTab({ federationId }: SessionsTabProps) {
+export function SessionsTab({ federationId, guardianNames }: SessionsTabProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +158,9 @@ export function SessionsTab({ federationId }: SessionsTabProps) {
                     </Badge>
                   ) : null
                 )}
+              </div>
+              <div className="sm:ml-auto">
+                <GuardianChips guardians={session.guardians} guardianNames={guardianNames} />
               </div>
             </div>
           </Link>

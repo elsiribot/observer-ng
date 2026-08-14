@@ -108,10 +108,14 @@ async fn session_page_and_items() {
     assert_eq!(page[0].tx_count, 1);
     assert_eq!(page[0].items_by_kind, json!({"ln": 1}));
     assert!(page[0].estimated_time.is_some());
+    // Session 1's only CI was contributed by peer 3.
+    assert_eq!(page[0].guardians, vec![3u16]);
     assert_eq!(page[1].session_index, 0);
     assert_eq!(page[1].tx_count, 1);
     assert_eq!(page[1].items_by_kind, json!({"wallet": 1}));
     assert!(page[1].estimated_time.is_some());
+    // Session 0's only CI was contributed by peer 2.
+    assert_eq!(page[1].guardians, vec![2u16]);
 
     // Keyset cursor: only sessions strictly before 1.
     let next_page = observer

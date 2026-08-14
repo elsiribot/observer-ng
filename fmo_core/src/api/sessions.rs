@@ -106,6 +106,9 @@ struct SessionSummaryRow {
     next_vote_time: Option<chrono::NaiveDateTime>,
     tx_count: i64,
     items_by_kind: serde_json::Value,
+    /// Ascending peer ids that contributed >=1 CI; NULL (→ empty) for a
+    /// session with no consensus items.
+    guardians: Option<Vec<i32>>,
 }
 
 impl From<SessionSummaryRow> for SessionSummary {
@@ -125,6 +128,12 @@ impl From<SessionSummaryRow> for SessionSummary {
             time_source: time.time_source.map(str::to_owned),
             tx_count: row.tx_count,
             items_by_kind: row.items_by_kind,
+            guardians: row
+                .guardians
+                .unwrap_or_default()
+                .into_iter()
+                .map(|id| id as u16)
+                .collect(),
         }
     }
 }
@@ -160,11 +169,19 @@ impl FederationObserver {
             .context("Federation doesn't exist")?;
 
         // language=postgresql
+        // The `guardians` array is computed by a correlated subquery over
+        // `consensus_items` (keyed on the PK prefix `(federation_id,
+        // session_index)`) and evaluated only for the <=200 rows the LIMIT
+        // emits, so it stays cheap despite scanning per session.
         const QUERY: &str = "
             SELECT ss.session_index::bigint,
                    st.estimated_session_timestamp AS estimated_session_timestamp,
                    st.next_vote_time AS next_vote_time,
-                   ss.tx_count::bigint, ss.items_by_kind
+                   ss.tx_count::bigint, ss.items_by_kind,
+                   (SELECT array_agg(DISTINCT ci.peer_id ORDER BY ci.peer_id)
+                    FROM consensus_items ci
+                    WHERE ci.federation_id = ss.federation_id
+                      AND ci.session_index = ss.session_index) AS guardians
             FROM session_stats ss
             LEFT JOIN session_times st ON st.federation_id = ss.federation_id AND st.session_index = ss.session_index
             WHERE ss.federation_id = $1 AND ($2::int IS NULL OR ss.session_index < $2)

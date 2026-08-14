@@ -205,6 +205,11 @@ pub struct SessionSummary {
     pub time_source: Option<String>,
     pub tx_count: i64,
     pub items_by_kind: serde_json::Value,
+    /// Peer ids of the guardians that contributed at least one consensus item
+    /// to this session, ascending. Derived from `consensus_items.peer_id`; a
+    /// guardian missing here proposed no CI in the session (transactions are
+    /// not attributed to a proposing peer in storage, so they don't count).
+    pub guardians: Vec<u16>,
 }
 
 /// One item (a transaction or a consensus item) within a session's ordered

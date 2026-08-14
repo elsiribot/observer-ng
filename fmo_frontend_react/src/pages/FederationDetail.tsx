@@ -90,6 +90,16 @@ export function FederationDetail() {
       (health) => health?.latest !== null && health?.latest !== undefined
     );
   }, [guardianHealth]);
+
+  // peer id -> guardian name, so the session list can label per-guardian CI
+  // contribution chips and flag guardians missing from a session.
+  const guardianNames = useMemo(() => {
+    const names: Record<number, string> = {};
+    for (const g of config?.guardians ?? []) {
+      names[g.id] = g.name;
+    }
+    return names;
+  }, [config]);
   
   // Calculate initial zoom to show last 3 months of data by default
   const initialZoom = useMemo(() => {
@@ -739,7 +749,7 @@ export function FederationDetail() {
 
           {activeTab === 'sessions' && id && (
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
-              <SessionsTab federationId={id} />
+              <SessionsTab federationId={id} guardianNames={guardianNames} />
             </div>
           )}
 
