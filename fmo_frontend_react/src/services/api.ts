@@ -3,6 +3,7 @@ import type {
   FedimintTotals,
   FederationSummary,
   GatewayInfo,
+  GuardianLatencySeries,
   GuardianTimeline,
   SessionItem,
   SessionSummary,
@@ -155,6 +156,14 @@ export const api = {
         window,
         despike: despike ? undefined : 'false',
       })}`
+    ),
+
+  // Guardian API-latency time series over the given window (7d | 30d; backend
+  // default 30d): one bucketed line per guardian plus the quorum line (slowest
+  // latency of the fastest `threshold` guardians per poll).
+  getGuardianLatency: (federationId: string, window: string = '30d') =>
+    request<GuardianLatencySeries>(
+      `/federations/${federationId}/health/latency${toQueryString({ window })}`
     ),
 };
 

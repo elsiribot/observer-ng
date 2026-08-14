@@ -83,6 +83,36 @@ export interface GuardianTimeline {
   inoperable_intervals: TimeInterval[];
 }
 
+/// A guardian identified by peer id + display name (labels latency series).
+export interface GuardianRef {
+  guardian_id: number;
+  name: string;
+}
+
+/// One time bucket of the guardian latency series.
+export interface LatencyBucket {
+  /// Bucket start, unix epoch seconds.
+  time: number;
+  /// Avg latency (ms) per guardian, aligned to `GuardianLatencySeries.guardians`;
+  /// null where the guardian had no successful response in the bucket.
+  latencies: (number | null)[];
+  /// Effective consensus latency: avg over the bucket's polls of the slowest
+  /// latency among the `threshold` fastest responders. null when no poll had
+  /// `threshold` responders.
+  quorum_ms: number | null;
+}
+
+/// Guardian API-latency series: one line per guardian plus the quorum line.
+export interface GuardianLatencySeries {
+  window_start: number;
+  window_end: number;
+  num_guardians: number;
+  threshold: number;
+  bucket_seconds: number;
+  guardians: GuardianRef[];
+  buckets: LatencyBucket[];
+}
+
 export interface NavItem {
   name: string;
   href: string;

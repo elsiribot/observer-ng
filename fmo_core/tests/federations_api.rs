@@ -637,6 +637,26 @@ async fn insert_health_sample_sc(
     .unwrap();
 }
 
+/// Inserts a `guardian_health` sample with an explicit API latency.
+/// `latency = Some(ms)` writes an online status responding in `ms`; `None`
+/// writes an offline sample (NULL status), which the latency series ignores.
+async fn insert_health_latency(
+    conn: &deadpool_postgres::Object,
+    fed: &[u8],
+    time: chrono::NaiveDateTime,
+    guardian_id: i32,
+    latency: Option<i32>,
+) {
+    let status: Option<serde_json::Value> = latency.map(|_| serde_json::json!({}));
+    conn.execute(
+        "INSERT INTO guardian_health (federation_id, time, guardian_id, status, block_height, latency_ms)
+         VALUES ($1, $2, $3, $4, NULL, $5)",
+        &[&fed, &time, &guardian_id, &status, &latency.unwrap_or(0)],
+    )
+    .await
+    .unwrap();
+}
+
 /// `get_guardian_timeline` derives, from mixed NULL/non-NULL `guardian_health`
 /// samples: (a) per-guardian maximal offline runs, and (b) federation-wide
 /// inoperable runs where the online guardian count drops below the consensus
@@ -1018,4 +1038,85 @@ async fn guardian_timeline_flags_lagging_guardians() {
     assert_eq!(timeline.inoperable_intervals.len(), 1);
     assert_eq!(timeline.inoperable_intervals[0].start, epoch(t[2]));
     assert_eq!(timeline.inoperable_intervals[0].end, epoch(t[4]));
+}
+
+/// `get_guardian_latency` returns per-guardian bucketed latency plus the quorum
+/// line — the threshold-th fastest responder at each poll. A 1-hour window
+/// yields 60s buckets, so each minute-spaced poll lands in its own bucket and
+/// the averages are the raw values.
+#[tokio::test]
+async fn guardian_latency_series_and_quorum_line() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    // 4 guardians => threshold 3, so the quorum line is the 3rd-fastest.
+    let (config, federation_id) = multi_guardian_config(4);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    // Three polls, one minute apart, a few minutes ago (inside a 1h window).
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(5)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..3)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    // Poll 0: all four respond (10, 20, 30, 40) => 3rd-fastest = 30.
+    for (gid, lat) in [(0, 10), (1, 20), (2, 30), (3, 40)] {
+        insert_health_latency(&conn, &fed, t[0], gid, Some(lat)).await;
+    }
+    // Poll 1: guardian 3 offline; three respond (12, 22, 32) => 3rd = 32.
+    for (gid, lat) in [(0, Some(12)), (1, Some(22)), (2, Some(32)), (3, None)] {
+        insert_health_latency(&conn, &fed, t[1], gid, lat).await;
+    }
+    // Poll 2: only two respond (5, 6) => below threshold 3 => no quorum sample.
+    for (gid, lat) in [(0, Some(5)), (1, Some(6)), (2, None), (3, None)] {
+        insert_health_latency(&conn, &fed, t[2], gid, lat).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let series = observer
+        .get_guardian_latency(federation_id, chrono::Duration::hours(1))
+        .await
+        .unwrap();
+
+    assert_eq!(series.num_guardians, 4);
+    assert_eq!(series.threshold, 3);
+    assert_eq!(series.bucket_seconds, 60);
+    assert_eq!(series.guardians.len(), 4);
+    assert_eq!(series.guardians[0].name, "peer0");
+    assert_eq!(series.buckets.len(), 3);
+
+    // Buckets are ascending by time, so index maps to poll index.
+    assert_eq!(
+        series.buckets[0].latencies,
+        vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)]
+    );
+    assert_eq!(series.buckets[0].quorum_ms, Some(30.0));
+
+    assert_eq!(
+        series.buckets[1].latencies,
+        vec![Some(12.0), Some(22.0), Some(32.0), None]
+    );
+    assert_eq!(series.buckets[1].quorum_ms, Some(32.0));
+
+    // Only two responders < threshold 3 => no quorum sample for this bucket.
+    assert_eq!(
+        series.buckets[2].latencies,
+        vec![Some(5.0), Some(6.0), None, None]
+    );
+    assert_eq!(series.buckets[2].quorum_ms, None);
 }

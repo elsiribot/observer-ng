@@ -130,6 +130,55 @@ pub struct GuardianTimeline {
     pub inoperable_intervals: Vec<TimeInterval>,
 }
 
+/// A guardian identified by peer id + display name, used to label the series in
+/// [`GuardianLatencySeries`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianRef {
+    pub guardian_id: u16,
+    pub name: String,
+}
+
+/// One time bucket of the guardian API-latency series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyBucket {
+    /// Bucket start, unix epoch seconds.
+    pub time: i64,
+    /// Average API latency (ms) in this bucket, one entry per guardian in the
+    /// same order as [`GuardianLatencySeries::guardians`]. `None` where the
+    /// guardian produced no successful response in the bucket (so its line has
+    /// a gap rather than a fabricated point).
+    pub latencies: Vec<Option<f64>>,
+    /// The federation's effective consensus latency in this bucket: the average
+    /// over the bucket's polls of the slowest latency among the `threshold`
+    /// fastest responding guardians at each poll (e.g. the 5th-fastest of 7 in
+    /// a 5/7). `None` when no poll in the bucket had `threshold` responders.
+    pub quorum_ms: Option<f64>,
+}
+
+/// Guardian API-latency time series for a federation over a window: one line
+/// per guardian plus the derived quorum-latency line (see
+/// [`LatencyBucket::quorum_ms`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianLatencySeries {
+    /// Window start, unix epoch seconds.
+    pub window_start: i64,
+    /// Window end, unix epoch seconds (the query time / "now").
+    pub window_end: i64,
+    /// Number of guardians in the federation (from its config).
+    pub num_guardians: usize,
+    /// Consensus threshold: how many of the fastest guardians the quorum line
+    /// tracks (the k in "slowest of the k fastest").
+    pub threshold: usize,
+    /// Bucket width in seconds (chosen from the window for ~a few hundred
+    /// points).
+    pub bucket_seconds: i64,
+    /// The guardians, in peer-id order; indexes align with
+    /// [`LatencyBucket::latencies`].
+    pub guardians: Vec<GuardianRef>,
+    /// Time buckets, ascending by `time`.
+    pub buckets: Vec<LatencyBucket>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoncesRequest {
     pub nonces: Vec<String>,

@@ -648,6 +648,148 @@ impl FederationObserver {
             inoperable_intervals,
         })
     }
+
+    /// Builds the guardian API-latency time series for a federation over the
+    /// last `window`: one bucketed line per guardian plus a derived
+    /// quorum-latency line.
+    ///
+    /// # Quorum latency
+    /// At each ~60s poll we rank the *responding* guardians by latency and take
+    /// the `threshold`-th fastest — the slowest latency among the fastest
+    /// quorum (e.g. the 5th-fastest of 7 in a 5/7). That is the latency at
+    /// which the federation could actually reach consensus at that instant.
+    /// Polls with fewer than `threshold` responders contribute no quorum
+    /// sample. The per-poll quorum latencies are then averaged per bucket.
+    ///
+    /// Raw samples (60s × window × guardians) are far too many to plot, so both
+    /// the per-guardian lines and the quorum line are averaged into ~a few
+    /// hundred time buckets (`bucket_seconds`, derived from the window) in SQL.
+    pub async fn get_guardian_latency(
+        &self,
+        federation_id: FederationId,
+        window: chrono::Duration,
+    ) -> anyhow::Result<fmo_api_types::GuardianLatencySeries> {
+        use fmo_api_types::{GuardianLatencySeries, GuardianRef, LatencyBucket};
+
+        let federation = self
+            .get_federation(federation_id)
+            .await
+            .context("Unknown federation")?
+            .context("Unknown federation")?;
+
+        let names: BTreeMap<u16, String> = federation
+            .config
+            .global
+            .api_endpoints
+            .iter()
+            .map(|(peer, peer_url)| (peer.to_usize() as u16, peer_url.name.clone()))
+            .collect();
+        let num_guardians = names.len();
+        let threshold = NumPeers::from(num_guardians).threshold();
+
+        let window_end = chrono::Utc::now().naive_utc();
+        let window_start = window_end - window;
+        let fed = federation_id.consensus_encode_to_vec();
+
+        // Aim for ~240 buckets across the window, floored at one minute (the
+        // poll interval) so buckets never subdivide a single poll.
+        let bucket_seconds = (window.num_seconds() / 240).max(60);
+
+        // Guardian peer-id order, and a lookup from peer id to series index.
+        let guardian_ids: Vec<u16> = names.keys().copied().collect();
+        let index_of: BTreeMap<u16, usize> = guardian_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
+
+        #[derive(FromRow)]
+        struct LatencyRow {
+            bucket: chrono::NaiveDateTime,
+            // -1 marks the derived quorum line; otherwise a guardian peer id.
+            guardian_id: i32,
+            avg_ms: f64,
+        }
+
+        let rows = query::<LatencyRow>(
+            &self.connection().await?,
+            // language=postgresql
+            "WITH resp AS (
+                 SELECT guardian_id, time, latency_ms
+                 FROM guardian_health
+                 WHERE federation_id = $1 AND time >= $2 AND time <= $3
+                   AND status IS NOT NULL
+             ),
+             -- Rank responders by latency within each poll; the threshold-th
+             -- fastest is the quorum latency for that poll.
+             ranked AS (
+                 SELECT time, latency_ms,
+                        ROW_NUMBER() OVER (PARTITION BY time ORDER BY latency_ms) AS rnk,
+                        COUNT(*) OVER (PARTITION BY time) AS n_resp
+                 FROM resp
+             ),
+             quorum_per_poll AS (
+                 SELECT time, latency_ms AS q
+                 FROM ranked
+                 WHERE rnk = $5 AND n_resp >= $5
+             )
+             SELECT date_bin(make_interval(secs => $4), time, $2) AS bucket,
+                    guardian_id,
+                    AVG(latency_ms)::float8 AS avg_ms
+             FROM resp
+             GROUP BY 1, 2
+             UNION ALL
+             SELECT date_bin(make_interval(secs => $4), time, $2) AS bucket,
+                    -1 AS guardian_id,
+                    AVG(q)::float8 AS avg_ms
+             FROM quorum_per_poll
+             GROUP BY 1
+             ORDER BY bucket, guardian_id",
+            &[
+                &fed,
+                &window_start,
+                &window_end,
+                &(bucket_seconds as f64),
+                &(threshold as i64),
+            ],
+        )
+        .await?;
+
+        // Assemble long-form rows into per-bucket records. Rows are ordered by
+        // bucket, so we accumulate into an ordered map keyed by bucket time.
+        let mut buckets: BTreeMap<i64, LatencyBucket> = BTreeMap::new();
+        for row in rows {
+            let time = row.bucket.and_utc().timestamp();
+            let entry = buckets.entry(time).or_insert_with(|| LatencyBucket {
+                time,
+                latencies: vec![None; num_guardians],
+                quorum_ms: None,
+            });
+            if row.guardian_id == -1 {
+                entry.quorum_ms = Some(row.avg_ms);
+            } else if let Some(&idx) = index_of.get(&(row.guardian_id as u16)) {
+                entry.latencies[idx] = Some(row.avg_ms);
+            }
+        }
+
+        let guardians = guardian_ids
+            .into_iter()
+            .map(|guardian_id| GuardianRef {
+                guardian_id,
+                name: names.get(&guardian_id).cloned().unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(GuardianLatencySeries {
+            window_start: window_start.and_utc().timestamp(),
+            window_end: window_end.and_utc().timestamp(),
+            num_guardians,
+            threshold,
+            bucket_seconds,
+            guardians,
+            buckets: buckets.into_values().collect(),
+        })
+    }
 }
 
 #[derive(FromRow)]

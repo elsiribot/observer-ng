@@ -11,6 +11,7 @@ import { ConsensusTab } from '../components/explorer/ConsensusTab';
 import { ExplorerSearch } from '../components/explorer/ExplorerSearch';
 import { GatewaysTab } from '../components/GatewaysTab';
 import { GuardianTimeline } from '../components/GuardianTimeline';
+import { GuardianLatencyChart } from '../components/GuardianLatencyChart';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
@@ -372,8 +373,11 @@ export function FederationDetail() {
             )}
           </div>
           {showTimeline && id && (
-            <div className="mb-4 sm:mb-6 pb-4 sm:pb-6 border-b border-gray-200 dark:border-gray-700">
+            <div className="mb-4 sm:mb-6 pb-4 sm:pb-6 border-b border-gray-200 dark:border-gray-700 space-y-6">
               <GuardianTimeline federationId={id} />
+              <div className="pt-4 border-t border-gray-100 dark:border-gray-700/50">
+                <GuardianLatencyChart federationId={id} />
+              </div>
             </div>
           )}
           {config ? (
