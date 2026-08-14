@@ -53,6 +53,21 @@ pub struct FederationUtxo {
     pub amount: Amount,
 }
 
+/// One ecash-note denomination's issuance/circulation counts for a federation,
+/// served by the mint module's `/denominations` endpoint. Each mint output
+/// mints one note and each mint input spends one, so these are plain note
+/// counts (not amounts).
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct MintDenomination {
+    /// Note denomination in millisatoshis (a power of two).
+    pub denomination_msat: u64,
+    /// Total notes of this denomination ever minted.
+    pub issued: u64,
+    /// Notes of this denomination currently unspent (`issued - spent`, clamped
+    /// at `>= 0`).
+    pub in_circulation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardianHealth {
     pub avg_uptime: f32,

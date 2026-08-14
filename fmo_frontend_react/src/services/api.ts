@@ -6,6 +6,7 @@ import type {
   GatewayInfo,
   GuardianLatencySeries,
   GuardianTimeline,
+  MintDenomination,
   SessionItem,
   SessionSummary,
   TxDetail,
@@ -174,6 +175,12 @@ export const api = {
     request<GuardianLatencySeries>(
       `/federations/${federationId}/health/latency${toQueryString({ window })}`
     ),
+
+  // Ecash note denominations for the federation from the mint module: per
+  // power-of-two denomination, the number of notes ever issued and currently in
+  // circulation. Empty for federations without a mint module or with no notes.
+  getMintDenominations: (federationId: string) =>
+    request<MintDenomination[]>(`/federations/${federationId}/modules/mint/denominations`),
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited

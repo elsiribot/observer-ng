@@ -38,6 +38,18 @@ export interface FederationUtxo {
   amount: number;
 }
 
+// One ecash-note denomination's counts for a federation, from the mint module's
+// `/denominations` endpoint. Each mint output mints one note and each mint input
+// spends one, so these are note counts (not amounts).
+export interface MintDenomination {
+  // Note denomination in millisatoshis (a power of two).
+  denomination_msat: number;
+  // Total notes of this denomination ever minted.
+  issued: number;
+  // Notes of this denomination currently unspent (issued - spent, >= 0).
+  in_circulation: number;
+}
+
 export interface GuardianHealth {
   avg_uptime: number;
   avg_latency: number;
