@@ -615,6 +615,28 @@ async fn insert_health_sample(
     .unwrap();
 }
 
+/// Inserts a `guardian_health` sample carrying a consensus `session_count`.
+/// `session_count = Some(n)` writes an online status reporting session count
+/// `n` (used to exercise the lagging-guardian rule); `None` writes NULL
+/// (offline).
+async fn insert_health_sample_sc(
+    conn: &deadpool_postgres::Object,
+    fed: &[u8],
+    time: chrono::NaiveDateTime,
+    guardian_id: i32,
+    session_count: Option<i64>,
+) {
+    let status: Option<serde_json::Value> =
+        session_count.map(|sc| serde_json::json!({ "federation": { "session_count": sc } }));
+    conn.execute(
+        "INSERT INTO guardian_health (federation_id, time, guardian_id, status, block_height, latency_ms)
+         VALUES ($1, $2, $3, $4, NULL, 10)",
+        &[&fed, &time, &guardian_id, &status],
+    )
+    .await
+    .unwrap();
+}
+
 /// `get_guardian_timeline` derives, from mixed NULL/non-NULL `guardian_health`
 /// samples: (a) per-guardian maximal offline runs, and (b) federation-wide
 /// inoperable runs where the online guardian count drops below the consensus
@@ -893,4 +915,93 @@ async fn guardian_timeline_despikes_single_poll_blips() {
         timeline.inoperable_intervals.is_empty(),
         "a despiked blip must not fabricate an inoperable window"
     );
+}
+
+/// A guardian that responds but reports a `session_count` far behind its peers
+/// is *lagging*: reported as a lagging interval (not offline), and counted as
+/// non-participating so — together with an offline guardian — it drops the
+/// participating count below threshold and marks the federation inoperable.
+#[tokio::test]
+async fn guardian_timeline_flags_lagging_guardians() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    // 4 guardians => threshold 3.
+    let (config, federation_id) = multi_guardian_config(4);
+    insert_federation(&pool, &config, federation_id).await;
+    let fed = federation_id.consensus_encode_to_vec();
+
+    let base = (chrono::Utc::now() - chrono::Duration::minutes(10)).naive_utc();
+    let t: Vec<chrono::NaiveDateTime> = (0..5)
+        .map(|i| base + chrono::Duration::minutes(i))
+        .collect();
+
+    let conn = pool.get().await.unwrap();
+    for (i, &time) in t.iter().enumerate() {
+        let i = i as i64;
+        // Guardians 0 and 1: online and current, advancing 100, 101, ...
+        insert_health_sample_sc(&conn, &fed, time, 0, Some(100 + i)).await;
+        insert_health_sample_sc(&conn, &fed, time, 1, Some(100 + i)).await;
+        // Guardian 2: current except at t2 and t3, where it is stuck at 100
+        // while peers are at 102/103 (behind by 2/3 > 1 => lagging).
+        let g2 = if i == 2 || i == 3 { 100 } else { 100 + i };
+        insert_health_sample_sc(&conn, &fed, time, 2, Some(g2)).await;
+        // Guardian 3: offline at t2 and t3, current otherwise.
+        let g3 = if i == 2 || i == 3 {
+            None
+        } else {
+            Some(100 + i)
+        };
+        insert_health_sample_sc(&conn, &fed, time, 3, g3).await;
+    }
+    drop(conn);
+
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        ModuleRegistry::new(vec![]),
+    )
+    .await
+    .unwrap();
+
+    let timeline = observer
+        .get_guardian_timeline(federation_id, chrono::Duration::days(1))
+        .await
+        .unwrap();
+    let epoch = |ndt: chrono::NaiveDateTime| ndt.and_utc().timestamp();
+
+    // Guardians 0 and 1: never offline, never lagging.
+    for gid in [0usize, 1usize] {
+        assert!(timeline.guardians[gid].offline_intervals.is_empty());
+        assert!(timeline.guardians[gid].lagging_intervals.is_empty());
+    }
+
+    // Guardian 2: one lagging interval [t2, t4), no offline interval.
+    assert!(timeline.guardians[2].offline_intervals.is_empty());
+    assert_eq!(timeline.guardians[2].lagging_intervals.len(), 1);
+    assert_eq!(
+        timeline.guardians[2].lagging_intervals[0].start,
+        epoch(t[2])
+    );
+    assert_eq!(timeline.guardians[2].lagging_intervals[0].end, epoch(t[4]));
+
+    // Guardian 3: one offline interval [t2, t4), no lagging interval.
+    assert!(timeline.guardians[3].lagging_intervals.is_empty());
+    assert_eq!(timeline.guardians[3].offline_intervals.len(), 1);
+    assert_eq!(
+        timeline.guardians[3].offline_intervals[0].start,
+        epoch(t[2])
+    );
+    assert_eq!(timeline.guardians[3].offline_intervals[0].end, epoch(t[4]));
+
+    // At t2/t3 only guardians 0 and 1 participate (2 < threshold 3), because
+    // guardian 2 lags and guardian 3 is offline => inoperable [t2, t4).
+    assert_eq!(timeline.inoperable_intervals.len(), 1);
+    assert_eq!(timeline.inoperable_intervals[0].start, epoch(t[2]));
+    assert_eq!(timeline.inoperable_intervals[0].end, epoch(t[4]));
 }

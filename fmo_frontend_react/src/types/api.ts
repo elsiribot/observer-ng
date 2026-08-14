@@ -64,6 +64,10 @@ export interface GuardianLane {
   guardian_id: number;
   name: string;
   offline_intervals: TimeInterval[];
+  /// Runs where the guardian was online but lagging (its consensus
+  /// session_count trailed its peers), so it was not effectively
+  /// participating. Disjoint from `offline_intervals`.
+  lagging_intervals: TimeInterval[];
 }
 
 /// Guardian outage timeline for a federation over a time window. One lane per

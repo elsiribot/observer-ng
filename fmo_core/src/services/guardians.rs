@@ -260,22 +260,36 @@ impl FederationObserver {
         let federations = query::<FederationHealthRow>(
             &self.connection().await?,
             // language=postgresql
-            // A guardian counts as online if EITHER of its two most recent
-            // samples reported (debounce a single transient timeout), matching
-            // the per-federation panel's latest-status rule so the fleet health
-            // badge doesn't flip to degraded on one missed poll.
+            // A guardian counts as online here only if it is *participating*:
+            // its newest reported session_count (among its last 2 samples, to
+            // debounce a single transient miss) is present AND caught up to the
+            // federation tip (trails it by <=1). A deeply lagging guardian is
+            // thus treated as degraded, matching the timeline's participating
+            // rule, while a lone missed poll still doesn't flip it.
             "WITH last2 AS (
                  SELECT federation_id, guardian_id,
-                        (status -> 'federation' ->> 'session_count') IS NOT NULL AS reported,
+                        (status -> 'federation' ->> 'session_count')::bigint AS sc,
                         ROW_NUMBER() OVER (PARTITION BY federation_id, guardian_id ORDER BY time DESC) AS rn
                  FROM guardian_health
+             ),
+             latest AS (
+                 SELECT federation_id, guardian_id,
+                        (array_remove(array_agg(sc ORDER BY rn), NULL))[1] AS sc
+                 FROM last2
+                 WHERE rn <= 2
+                 GROUP BY federation_id, guardian_id
+             ),
+             tip AS (
+                 SELECT federation_id, MAX(sc) AS tip_sc FROM latest GROUP BY federation_id
              )
-             SELECT federation_id,
-                    COUNT(DISTINCT guardian_id)::int AS guardians,
-                    COUNT(DISTINCT guardian_id) FILTER (WHERE reported)::int AS online_guardians
-             FROM last2
-             WHERE rn <= 2
-             GROUP BY federation_id",
+             SELECT l.federation_id,
+                    COUNT(*)::int AS guardians,
+                    COUNT(*) FILTER (
+                        WHERE l.sc IS NOT NULL AND (t.tip_sc IS NULL OR t.tip_sc - l.sc <= 1)
+                    )::int AS online_guardians
+             FROM latest l
+             JOIN tip t ON t.federation_id = l.federation_id
+             GROUP BY l.federation_id",
             &[],
         )
         .await?;
@@ -310,9 +324,18 @@ impl FederationObserver {
     }
 
     /// Builds the guardian outage timeline for a federation over the last
-    /// `window`: one lane per guardian listing the maximal runs it was offline,
-    /// plus the windows where the federation was inoperable (online guardian
-    /// count below the consensus threshold).
+    /// `window`: one lane per guardian listing the maximal runs it was offline
+    /// or lagging, plus the windows where the federation was inoperable
+    /// (participating guardian count below the consensus threshold).
+    ///
+    /// # Lagging rule
+    /// A guardian that responds but reports a consensus `session_count`
+    /// trailing the highest among its peers (the tip) by more than one is
+    /// *lagging*: online but stuck behind and not effectively participating
+    /// in consensus. Lagging runs are reported separately from offline runs
+    /// (they are disjoint — an offline guardian reports no session count)
+    /// and, like offline time, count a guardian as non-participating for
+    /// the inoperable threshold.
     ///
     /// # Offline rule
     /// The guardian poller writes one `guardian_health` row per guardian per
@@ -331,10 +354,11 @@ impl FederationObserver {
     ///
     /// # Inoperable rule
     /// Each poll timestamp is shared by all guardians (the poller stamps one
-    /// time per poll), so we count, per timestamp, how many guardians responded
-    /// (non-NULL `status`). The federation is inoperable across `[poll, next
-    /// poll)` whenever that count is `< threshold`, coalesced into maximal
-    /// runs, with an ongoing sub-threshold state extended to `window_end`.
+    /// time per poll), so we count, per timestamp, how many guardians were
+    /// *participating* (online AND caught up to the tip). The federation is
+    /// inoperable across `[poll, next poll)` whenever that count is
+    /// `< threshold`, coalesced into maximal runs, with an ongoing
+    /// sub-threshold state extended to `window_end`.
     ///
     /// Both interval sets are computed with gap-and-islands SQL over
     /// `guardian_health` rather than shipping raw samples to Rust; guardians
@@ -368,95 +392,132 @@ impl FederationObserver {
 
         let conn = self.connection().await?;
 
-        // --- per-guardian offline intervals (gap-and-islands) ---
+        // --- per-guardian offline + lagging intervals (gap-and-islands) ---
+        // One combined query classifies each poll into a per-guardian state
+        // (offline / lagging / online) and emits maximal runs of the two
+        // abnormal states, tagged by `kind`.
         #[derive(FromRow)]
-        struct OfflineIntervalRow {
+        struct StateIntervalRow {
             guardian_id: i32,
+            kind: String,
             start_time: chrono::NaiveDateTime,
             end_time: chrono::NaiveDateTime,
         }
 
-        let offline_rows = query::<OfflineIntervalRow>(
+        let state_rows = query::<StateIntervalRow>(
             &conn,
             // language=postgresql
-            "WITH raw AS (
-                 SELECT guardian_id, time, (status IS NOT NULL) AS raw_online
+            "WITH base AS (
+                 SELECT guardian_id, time,
+                        (status IS NOT NULL) AS raw_online,
+                        (status -> 'federation' ->> 'session_count')::bigint AS sc
                  FROM guardian_health
                  WHERE federation_id = $1 AND time >= $2 AND time <= $3
              ),
-             -- Despike single-poll false positives: a lone missed poll whose
-             -- immediate neighbours both reported is a transient timeout, not a
-             -- real outage (over 80% of raw outage *events* are these ~60s
-             -- blips but under 1% of downtime). Reclassify it as online so the
-             -- timeline only shows outages of >=2 consecutive missed polls.
-             -- Runs of >=2 misses are untouched and keep their full length.
-             samples AS (
+             -- The highest session_count reported by any online guardian at a
+             -- poll is the consensus tip the federation had reached then.
+             tipped AS (
+                 SELECT guardian_id, time, raw_online, sc,
+                        MAX(sc) OVER (PARTITION BY time) AS tip_sc
+                 FROM base
+             ),
+             -- Per-poll state: offline (no response), lagging (online but the
+             -- reported session_count trails the tip by >1, i.e. stuck behind
+             -- and not effectively participating), else online.
+             stated AS (
                  SELECT guardian_id, time,
                         CASE
-                            WHEN NOT raw_online
-                                 AND LAG(raw_online) OVER w = true
-                                 AND LEAD(raw_online) OVER w = true
-                            THEN true
-                            ELSE raw_online
-                        END AS online
-                 FROM raw
+                            WHEN NOT raw_online THEN 'offline'
+                            WHEN tip_sc IS NOT NULL AND tip_sc - sc > 1 THEN 'lagging'
+                            ELSE 'online'
+                        END AS raw_state
+                 FROM tipped
+             ),
+             -- Despike single-poll false positives per channel: a lone poll in
+             -- an abnormal state whose immediate neighbours were both NOT in
+             -- that state is a transient blip, reclassified to normal. Runs of
+             -- >=2 consecutive abnormal polls are untouched.
+             despiked AS (
+                 SELECT guardian_id, time,
+                        CASE WHEN raw_state = 'offline'
+                                  AND LAG(raw_state = 'offline') OVER w = false
+                                  AND LEAD(raw_state = 'offline') OVER w = false
+                             THEN false ELSE raw_state = 'offline' END AS off,
+                        CASE WHEN raw_state = 'lagging'
+                                  AND LAG(raw_state = 'lagging') OVER w = false
+                                  AND LEAD(raw_state = 'lagging') OVER w = false
+                             THEN false ELSE raw_state = 'lagging' END AS lag
+                 FROM stated
                  WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
+             ),
+             -- Unpivot the two despiked channels so one gap-and-islands pass,
+             -- partitioned by (guardian_id, kind), covers both.
+             long AS (
+                 SELECT guardian_id, time, 'offline' AS kind, off AS flag FROM despiked
+                 UNION ALL
+                 SELECT guardian_id, time, 'lagging' AS kind, lag AS flag FROM despiked
              ),
              flagged AS (
-                 SELECT guardian_id, time,
-                        LAG(online) OVER w AS prev_online,
+                 SELECT guardian_id, kind, time, flag,
+                        LAG(flag) OVER w AS prev_flag,
                         LAG(time) OVER w AS prev_time
-                 FROM samples
-                 WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
+                 FROM long
+                 WINDOW w AS (PARTITION BY guardian_id, kind ORDER BY time)
              ),
-             -- An offline segment spans [prev_time, time) whenever the previous
-             -- sample showed the guardian offline. A trailing segment extends a
-             -- still-offline last sample to window_end.
+             -- A segment spans [prev_time, time) whenever the previous sample
+             -- was in the abnormal state; a trailing segment extends a still-
+             -- abnormal last sample to window_end.
              segments AS (
-                 SELECT guardian_id, prev_time AS seg_start, time AS seg_end
+                 SELECT guardian_id, kind, prev_time AS seg_start, time AS seg_end
                  FROM flagged
-                 WHERE prev_time IS NOT NULL AND prev_online = false
+                 WHERE prev_time IS NOT NULL AND prev_flag = true
                  UNION ALL
-                 SELECT guardian_id, time AS seg_start, $3::timestamp AS seg_end
+                 SELECT guardian_id, kind, time AS seg_start, $3::timestamp AS seg_end
                  FROM (
-                     SELECT DISTINCT ON (guardian_id) guardian_id, time, online
-                     FROM samples
-                     ORDER BY guardian_id, time DESC
+                     SELECT DISTINCT ON (guardian_id, kind) guardian_id, kind, time, flag
+                     FROM long
+                     ORDER BY guardian_id, kind, time DESC
                  ) last_sample
-                 WHERE online = false
+                 WHERE flag = true
              ),
-             -- Coalesce touching/overlapping segments into maximal runs.
              grouped AS (
-                 SELECT guardian_id, seg_start, seg_end,
-                        SUM(new_grp) OVER (PARTITION BY guardian_id ORDER BY seg_start) AS grp
+                 SELECT guardian_id, kind, seg_start, seg_end,
+                        SUM(new_grp) OVER (PARTITION BY guardian_id, kind ORDER BY seg_start) AS grp
                  FROM (
-                     SELECT guardian_id, seg_start, seg_end,
-                            CASE WHEN LAG(seg_end) OVER (PARTITION BY guardian_id ORDER BY seg_start)
+                     SELECT guardian_id, kind, seg_start, seg_end,
+                            CASE WHEN LAG(seg_end) OVER (PARTITION BY guardian_id, kind ORDER BY seg_start)
                                       >= seg_start
                                  THEN 0 ELSE 1 END AS new_grp
                      FROM segments
                  ) s
              )
-             SELECT guardian_id,
+             SELECT guardian_id, kind,
                     MIN(seg_start) AS start_time,
                     MAX(seg_end) AS end_time
              FROM grouped
-             GROUP BY guardian_id, grp
-             ORDER BY guardian_id, start_time",
+             GROUP BY guardian_id, kind, grp
+             ORDER BY guardian_id, kind, start_time",
             &[&fed, &window_start, &window_end],
         )
         .await?;
 
-        // Group offline intervals by guardian id.
-        let mut intervals_by_guardian: BTreeMap<u16, Vec<TimeInterval>> = BTreeMap::new();
-        for row in offline_rows {
-            intervals_by_guardian
+        // Split intervals by guardian id and kind.
+        let mut offline_by_guardian: BTreeMap<u16, Vec<TimeInterval>> = BTreeMap::new();
+        let mut lagging_by_guardian: BTreeMap<u16, Vec<TimeInterval>> = BTreeMap::new();
+        for row in state_rows {
+            let interval = TimeInterval {
+                start: row.start_time.and_utc().timestamp(),
+                end: row.end_time.and_utc().timestamp(),
+            };
+            let bucket = if row.kind == "lagging" {
+                &mut lagging_by_guardian
+            } else {
+                &mut offline_by_guardian
+            };
+            bucket
                 .entry(row.guardian_id as u16)
                 .or_default()
-                .push(TimeInterval {
-                    start: row.start_time.and_utc().timestamp(),
-                    end: row.end_time.and_utc().timestamp(),
-                });
+                .push(interval);
         }
 
         // One lane per configured guardian, in peer-id order, even if it has no
@@ -466,9 +527,8 @@ impl FederationObserver {
             .map(|(guardian_id, name)| GuardianLane {
                 guardian_id,
                 name,
-                offline_intervals: intervals_by_guardian
-                    .remove(&guardian_id)
-                    .unwrap_or_default(),
+                offline_intervals: offline_by_guardian.remove(&guardian_id).unwrap_or_default(),
+                lagging_intervals: lagging_by_guardian.remove(&guardian_id).unwrap_or_default(),
             })
             .collect();
 
@@ -482,25 +542,39 @@ impl FederationObserver {
         let inoperable_rows = query::<InoperableIntervalRow>(
             &conn,
             // language=postgresql
-            // Despike per guardian first (same rule as the offline query), then
-            // count online guardians per poll, so an observer-side blip that
-            // drops several guardians for a single poll doesn't fabricate an
+            // Count *participating* guardians per poll — online AND caught up to
+            // the consensus tip — so a deeply lagging guardian counts against
+            // the threshold just like an offline one. Despike per guardian first
+            // (same rule as the state query), so an observer-side blip dropping
+            // several guardians for a single poll doesn't fabricate an
             // inoperable (sub-threshold) window.
-            "WITH raw AS (
-                 SELECT guardian_id, time, (status IS NOT NULL) AS raw_online
+            "WITH base AS (
+                 SELECT guardian_id, time,
+                        (status IS NOT NULL) AS raw_online,
+                        (status -> 'federation' ->> 'session_count')::bigint AS sc
                  FROM guardian_health
                  WHERE federation_id = $1 AND time >= $2 AND time <= $3
+             ),
+             tipped AS (
+                 SELECT guardian_id, time, raw_online, sc,
+                        MAX(sc) OVER (PARTITION BY time) AS tip_sc
+                 FROM base
+             ),
+             stated AS (
+                 SELECT guardian_id, time,
+                        (raw_online AND (tip_sc IS NULL OR tip_sc - sc <= 1)) AS participating
+                 FROM tipped
              ),
              despiked AS (
                  SELECT time,
                         CASE
-                            WHEN NOT raw_online
-                                 AND LAG(raw_online) OVER w = true
-                                 AND LEAD(raw_online) OVER w = true
+                            WHEN NOT participating
+                                 AND LAG(participating) OVER w = true
+                                 AND LEAD(participating) OVER w = true
                             THEN true
-                            ELSE raw_online
+                            ELSE participating
                         END AS online
-                 FROM raw
+                 FROM stated
                  WINDOW w AS (PARTITION BY guardian_id ORDER BY time)
              ),
              poll_counts AS (

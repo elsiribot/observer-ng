@@ -97,6 +97,13 @@ pub struct GuardianLane {
     /// samples had a NULL `status`), ordered by `start`. Empty when the
     /// guardian was online for the whole window (or had no samples).
     pub offline_intervals: Vec<TimeInterval>,
+    /// Maximal runs where the guardian was online but *lagging*: its reported
+    /// consensus `session_count` trailed the highest among its peers by more
+    /// than one, so it was not effectively participating in consensus. Ordered
+    /// by `start`. Disjoint from `offline_intervals` (an offline guardian
+    /// reports no session count). Lagging time counts against the federation's
+    /// participating-guardian total for the inoperable threshold.
+    pub lagging_intervals: Vec<TimeInterval>,
 }
 
 /// Guardian outage timeline for a federation over a time window: one lane per
@@ -112,11 +119,14 @@ pub struct GuardianTimeline {
     /// Total number of guardians in the federation (from its config).
     pub num_guardians: usize,
     /// Consensus threshold: `NumPeers::from(num_guardians).threshold()`. The
-    /// federation is inoperable when fewer than this many guardians are online.
+    /// federation is inoperable when fewer than this many guardians are
+    /// *participating* (online AND not lagging).
     pub threshold: usize,
     pub guardians: Vec<GuardianLane>,
-    /// Maximal runs where the online guardian count dropped below `threshold`,
-    /// i.e. the federation could not reach consensus, ordered by `start`.
+    /// Maximal runs where the participating guardian count (online AND caught
+    /// up) dropped below `threshold`, i.e. the federation could not reach
+    /// consensus, ordered by `start`. A deeply lagging guardian counts as
+    /// non-participating here just like an offline one.
     pub inoperable_intervals: Vec<TimeInterval>,
 }
 

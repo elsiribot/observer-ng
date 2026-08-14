@@ -165,7 +165,11 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
   const span = Math.max(1, window_end - window_start);
 
   const totalOutages =
-    inoperable_intervals.length + guardians.reduce((n, g) => n + g.offline_intervals.length, 0);
+    inoperable_intervals.length +
+    guardians.reduce(
+      (n, g) => n + g.offline_intervals.length + g.lagging_intervals.length,
+      0
+    );
 
   const ticks = Array.from({ length: TICK_COUNT + 1 }, (_, i) => {
     const fraction = i / TICK_COUNT;
@@ -186,6 +190,10 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-3 h-3 rounded-sm bg-red-500" />
           Guardian offline
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-3 h-3 rounded-sm bg-amber-400" />
+          Guardian lagging (behind on consensus)
         </span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-3 h-3 rounded-sm bg-orange-500/30 border border-orange-500/60" />
@@ -236,6 +244,18 @@ export function GuardianTimeline({ federationId }: GuardianTimelineProps) {
                 className="relative border-b border-gray-100 dark:border-gray-700/50 bg-gray-50 dark:bg-gray-900/40"
                 style={{ height: LANE_HEIGHT }}
               >
+                {g.lagging_intervals.map((iv, i) => {
+                  const { leftPct, widthPct } = intervalLayout(iv, window_start, window_end);
+                  if (widthPct <= 0) return null;
+                  return (
+                    <div
+                      key={`lag-${i}`}
+                      className="absolute top-1 bottom-1 bg-amber-400 hover:bg-amber-300 rounded-sm"
+                      style={{ left: `${leftPct}%`, width: `${Math.max(widthPct, 0.4)}%` }}
+                      title={intervalTooltip(iv, `${g.name} (lagging)`)}
+                    />
+                  );
+                })}
                 {g.offline_intervals.map((iv, i) => {
                   const { leftPct, widthPct } = intervalLayout(iv, window_start, window_end);
                   if (widthPct <= 0) return null;
