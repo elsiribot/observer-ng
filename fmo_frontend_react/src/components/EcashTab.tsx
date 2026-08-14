@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../services/api';
 import type { MintDenomination } from '../types/api';
 import { asBitcoin } from '../utils/format';
@@ -8,11 +8,35 @@ interface EcashTabProps {
   federationId: string;
 }
 
+// One mint module's denominations, tagged with a human label so a federation
+// running both the legacy `mint` and next-gen `mintv2` modules gets a labeled
+// section per module. A module that returned no data is dropped before render.
+interface MintModule {
+  label: string;
+  data: MintDenomination[];
+}
+
+// Aggregate note counts/values across all denominations of one module, for the
+// per-module summary line.
+function summarize(data: MintDenomination[]) {
+  return data.reduce(
+    (acc, d) => ({
+      issued: acc.issued + d.issued,
+      inCirculation: acc.inCirculation + d.in_circulation,
+      issuedValueMsat: acc.issuedValueMsat + d.issued * d.denomination_msat,
+      circulationValueMsat: acc.circulationValueMsat + d.in_circulation * d.denomination_msat,
+    }),
+    { issued: 0, inCirculation: 0, issuedValueMsat: 0, circulationValueMsat: 0 }
+  );
+}
+
 // Ecash denomination histogram tab: how many notes of each power-of-two
 // denomination have ever been issued vs. are currently in circulation, plus a
-// summary of total note counts and their value.
+// summary of total note counts and their value. Fetches both the `mint` and
+// `mintv2` modules and renders a labeled section for each that has data; the
+// empty state shows only when *both* return nothing.
 export function EcashTab({ federationId }: EcashTabProps) {
-  const [data, setData] = useState<MintDenomination[] | null>(null);
+  const [modules, setModules] = useState<MintModule[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,11 +44,21 @@ export function EcashTab({ federationId }: EcashTabProps) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api
-      .getMintDenominations(federationId)
-      .then((denominations) => {
+    // Each module is fetched independently; a failing/absent module (e.g. a 404
+    // when the federation doesn't run it) is treated as an empty list rather
+    // than failing the whole tab.
+    Promise.all([
+      api.getMintDenominations(federationId).catch(() => [] as MintDenomination[]),
+      api.getMintV2Denominations(federationId).catch(() => [] as MintDenomination[]),
+    ])
+      .then(([mint, mintV2]) => {
         if (!cancelled) {
-          setData(denominations);
+          setModules(
+            [
+              { label: 'Mint', data: mint },
+              { label: 'Mint v2', data: mintV2 },
+            ].filter((m) => m.data.length > 0)
+          );
           setLoading(false);
         }
       })
@@ -39,21 +73,6 @@ export function EcashTab({ federationId }: EcashTabProps) {
     };
   }, [federationId]);
 
-  const totals = useMemo(() => {
-    if (!data) {
-      return null;
-    }
-    return data.reduce(
-      (acc, d) => ({
-        issued: acc.issued + d.issued,
-        inCirculation: acc.inCirculation + d.in_circulation,
-        issuedValueMsat: acc.issuedValueMsat + d.issued * d.denomination_msat,
-        circulationValueMsat: acc.circulationValueMsat + d.in_circulation * d.denomination_msat,
-      }),
-      { issued: 0, inCirculation: 0, issuedValueMsat: 0, circulationValueMsat: 0 }
-    );
-  }, [data]);
-
   if (loading) {
     return (
       <div className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -66,7 +85,7 @@ export function EcashTab({ federationId }: EcashTabProps) {
     return <div className="py-10 text-center text-sm text-red-500">Error: {error}</div>;
   }
 
-  if (!data || data.length === 0) {
+  if (!modules || modules.length === 0) {
     return (
       <div className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
         No ecash notes observed for this federation
@@ -83,17 +102,39 @@ export function EcashTab({ federationId }: EcashTabProps) {
         axis, = issued − spent).
       </div>
 
-      {totals && (
-        <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <SummaryStat label="Notes issued" value={totals.issued.toLocaleString()} />
-          <SummaryStat label="In circulation" value={totals.inCirculation.toLocaleString()} />
-          <SummaryStat label="Value issued" value={asBitcoin(totals.issuedValueMsat, 8)} />
-          <SummaryStat
-            label="Value in circulation"
-            value={asBitcoin(totals.circulationValueMsat, 8)}
+      <div className="space-y-8">
+        {modules.map((module) => (
+          <MintModuleSection
+            key={module.label}
+            // Only show a per-module heading when more than one module has data,
+            // so the common single-module case stays uncluttered.
+            heading={modules.length > 1 ? module.label : null}
+            data={module.data}
           />
-        </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MintModuleSection({ heading, data }: { heading: string | null; data: MintDenomination[] }) {
+  const totals = summarize(data);
+
+  return (
+    <div>
+      {heading && (
+        <h3 className="mb-3 text-sm font-semibold text-gray-900 dark:text-white">{heading}</h3>
       )}
+
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <SummaryStat label="Notes issued" value={totals.issued.toLocaleString()} />
+        <SummaryStat label="In circulation" value={totals.inCirculation.toLocaleString()} />
+        <SummaryStat label="Value issued" value={asBitcoin(totals.issuedValueMsat, 8)} />
+        <SummaryStat
+          label="Value in circulation"
+          value={asBitcoin(totals.circulationValueMsat, 8)}
+        />
+      </div>
 
       <EcashDenominationsChart data={data} />
     </div>

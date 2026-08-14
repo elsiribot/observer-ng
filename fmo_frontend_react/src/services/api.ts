@@ -181,6 +181,12 @@ export const api = {
   // circulation. Empty for federations without a mint module or with no notes.
   getMintDenominations: (federationId: string) =>
     request<MintDenomination[]>(`/federations/${federationId}/modules/mint/denominations`),
+
+  // Same as `getMintDenominations` but for the next-generation `mintv2` module.
+  // A federation may run either mint module (or, transitionally, both), so the
+  // Ecash tab fetches both and renders whichever return data.
+  getMintV2Denominations: (federationId: string) =>
+    request<MintDenomination[]>(`/federations/${federationId}/modules/mintv2/denominations`),
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited
