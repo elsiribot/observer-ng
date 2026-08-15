@@ -145,6 +145,7 @@ struct SessionItemRow {
     kind: Option<String>,
     peer_id: Option<i32>,
     txid: Option<String>,
+    ecash_anon_bits: Option<f64>,
     user_tx_key: Option<String>,
     user_tx_kind: Option<String>,
     direction: Option<String>,
@@ -230,6 +231,7 @@ impl FederationObserver {
                 "
             SELECT t.item_index::bigint, 'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                    encode(t.txid,'hex') AS txid,
+                   tp.ecash_anon_bits AS ecash_anon_bits,
                    uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                    NULL::jsonb AS details,
                    t.synced_at AS synced_at,
@@ -238,10 +240,11 @@ impl FederationObserver {
                    uxt.role
             FROM transactions t
             {USER_TX_LATERAL}
+            LEFT JOIN transaction_privacy tp ON tp.federation_id = t.federation_id AND tp.txid = t.txid
             LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
             WHERE t.federation_id=$1 AND t.session_index=$2
             UNION ALL
-            SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL, NULL, NULL, ci.details,
+            SELECT ci.item_index::bigint, 'ci', ci.kind, ci.peer_id, NULL, NULL::double precision, NULL, NULL, NULL, ci.details,
                    ci.synced_at,
                    st.estimated_session_timestamp,
                    st.next_vote_time,
@@ -279,6 +282,7 @@ impl FederationObserver {
                     kind: row.kind,
                     peer_id: row.peer_id,
                     txid: row.txid,
+                    ecash_anon_bits: row.ecash_anon_bits,
                     user_tx_key: row.user_tx_key,
                     user_tx_kind: row.user_tx_kind,
                     direction: row.direction,

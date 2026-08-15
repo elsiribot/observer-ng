@@ -13,8 +13,8 @@ use fmo_module_mintv2::MintV2Observer;
 /// serialize the DB-touching tests within this binary.
 static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Resets the public (core) schema and drops any leftover `fmo_mintv2` schema so
-/// `setup_module_schema` re-runs the migration (incl. the backfill) cleanly.
+/// Resets the public (core) schema and drops any leftover `fmo_mintv2` schema
+/// so `setup_module_schema` re-runs the migration (incl. the backfill) cleanly.
 async fn reset_all(pool: &deadpool_postgres::Pool) {
     reset_db(pool).await;
     pool.get()
@@ -44,10 +44,7 @@ async fn setup_mint_schema(pool: &deadpool_postgres::Pool) {
 /// response to the GLOBAL denomination set, zero-filling denominations this
 /// federation never used, with an `EXISTS` guard so a federation with no mint
 /// notes of its own returns an empty list.
-async fn read_denominations(
-    pool: &deadpool_postgres::Pool,
-    fed: &[u8],
-) -> Vec<(i64, i64, i64)> {
+async fn read_denominations(pool: &deadpool_postgres::Pool, fed: &[u8]) -> Vec<(i64, i64, i64)> {
     pool.get()
         .await
         .unwrap()

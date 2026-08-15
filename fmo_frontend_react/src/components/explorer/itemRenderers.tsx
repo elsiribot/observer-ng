@@ -9,6 +9,7 @@ import { Link, useParams } from 'react-router-dom';
 import { Badge, type BadgeLevel } from '../Badge';
 import { api } from '../../services/api';
 import { asSats, formatNumber } from '../../utils/format';
+import { formatAnonSet } from '../../utils/anonSet';
 import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
 
 // Renderer registry for one `SessionItem` (a fedimint transaction or a
@@ -252,6 +253,14 @@ function TransactionRow({ item }: { item: SessionItem }) {
           >
             {item.txid ? shorten(item.txid) : 'unknown txid'}
             {item.txid && <CopyButton text={item.txid} />}
+          </span>
+        )}
+        {item.ecash_anon_bits != null && (
+          <span
+            className="text-xs text-gray-400 dark:text-gray-500 shrink-0"
+            title="Upper-bound ecash anonymity set — the transaction hides among ~this many spenders of its scarcest spent denomination."
+          >
+            {formatAnonSet(item.ecash_anon_bits)}
           </span>
         )}
         {item.user_tx_key && federationId && (

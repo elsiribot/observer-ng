@@ -28,6 +28,7 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     kind: 'wallet',
     peer_id: 0,
     txid: null,
+    ecash_anon_bits: null,
     user_tx_key: null,
     user_tx_kind: null,
     direction: null,

@@ -181,6 +181,20 @@ impl FederationObserver {
         .await?
         .map(|row| row.user_tx_key);
 
+        #[derive(FromRow)]
+        struct EcashAnonBitsRow {
+            ecash_anon_bits: f64,
+        }
+
+        let ecash_anon_bits = query_opt::<EcashAnonBitsRow>(
+            &self.connection().await?,
+            "SELECT ecash_anon_bits FROM transaction_privacy
+             WHERE federation_id = $1 AND txid = $2",
+            &[&fed, &txid],
+        )
+        .await?
+        .map(|row| row.ecash_anon_bits);
+
         let to_part = |row: PartRow| TxItemPart {
             index: row.index,
             kind: row.kind,
@@ -195,6 +209,7 @@ impl FederationObserver {
             inputs: inputs.into_iter().map(to_part).collect(),
             outputs: outputs.into_iter().map(to_part).collect(),
             user_tx_key,
+            ecash_anon_bits,
         })
     }
 

@@ -18,12 +18,12 @@ use tracing::warn;
 
 /// Observer module for the fedimint `mint` (ecash) module.
 ///
-/// It owns one table, `fmo_mint.note_denominations`, a per-federation cumulative
-/// count of notes issued/spent per denomination (maintained incrementally by
-/// process_output/process_input; see `schema/v0.sql`). Everything else —
-/// amounts and the JSON representation of inputs/outputs/consensus items — lives
-/// in the core structural tables, which is enough for ecash analytics like
-/// nonce spend lookups.
+/// It owns one table, `fmo_mint.note_denominations`, a per-federation
+/// cumulative count of notes issued/spent per denomination (maintained
+/// incrementally by process_output/process_input; see `schema/v0.sql`).
+/// Everything else — amounts and the JSON representation of
+/// inputs/outputs/consensus items — lives in the core structural tables, which
+/// is enough for ecash analytics like nonce spend lookups.
 pub struct MintObserver;
 
 #[async_trait::async_trait]
@@ -65,7 +65,9 @@ impl ObserverModule for MintObserver {
         let amount = input.maybe_v0_ref().map(|input_v0| input_v0.amount);
         match amount {
             // Each mint input spends exactly one note of `amount`.
-            Some(amount) => count_note(ctx, meta.federation_id, amount, NoteDirection::Spent).await?,
+            Some(amount) => {
+                count_note(ctx, meta.federation_id, amount, NoteDirection::Spent).await?
+            }
             None => warn!("Unknown mint input version, storing JSON only: {input:?}"),
         }
 
@@ -133,8 +135,9 @@ enum NoteDirection {
 
 /// Increment the per-denomination note counter for one processed note. Runs on
 /// `ctx.dbtx`, so it commits atomically with the module cursor (exactly-once
-/// per note; see `dispatch::process_module_batch`). The `search_path` is already
-/// set to the `fmo_mint` schema for the duration of the batch transaction.
+/// per note; see `dispatch::process_module_batch`). The `search_path` is
+/// already set to the `fmo_mint` schema for the duration of the batch
+/// transaction.
 async fn count_note(
     ctx: &mut ProcessCtx<'_>,
     federation_id: FederationId,

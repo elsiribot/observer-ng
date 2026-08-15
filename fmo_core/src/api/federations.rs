@@ -173,7 +173,7 @@ struct TimelineParams {
 
 /// Parses a timeline window label into a duration. Supports `Nd` (days) and
 /// `Nh` (hours), e.g. "7d", "30d". Defaults to 30 days when absent; errors on
-/// anything unparseable so a typo surfaces rather than silently defaulting.
+/// anything unparsable so a typo surfaces rather than silently defaulting.
 fn parse_timeline_window(window: Option<&str>) -> anyhow::Result<chrono::Duration> {
     let Some(raw) = window else {
         return Ok(chrono::Duration::days(30));

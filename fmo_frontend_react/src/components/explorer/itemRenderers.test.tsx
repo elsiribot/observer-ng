@@ -21,6 +21,7 @@ const baseItem: SessionItem = {
   kind: null,
   peer_id: null,
   txid: null,
+  ecash_anon_bits: null,
   user_tx_key: null,
   user_tx_kind: null,
   direction: null,
@@ -241,7 +242,15 @@ describe('TxDetailBody', () => {
   });
 
   function detail(inputs: TxItemPart[], outputs: TxItemPart[]): TxDetail {
-    return { txid: 'tx1', session_index: 1, item_index: 0, inputs, outputs, user_tx_key: null };
+    return {
+      txid: 'tx1',
+      session_index: 1,
+      item_index: 0,
+      inputs,
+      outputs,
+      user_tx_key: null,
+      ecash_anon_bits: null,
+    };
   }
 
   it('shows total in / out / fee in sats (fee = inputs − outputs)', () => {

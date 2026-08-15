@@ -329,6 +329,11 @@ pub struct SessionItem {
     pub kind: Option<String>,
     pub peer_id: Option<i32>,
     pub txid: Option<String>,
+    /// Upper-bound anonymity-set estimate in bits (weakest-link over spent
+    /// ecash denominations) for this fedimint transaction, from
+    /// `transaction_privacy`. `None` for CI items, non-ecash-spending
+    /// transactions, or when no pool data exists before the spend.
+    pub ecash_anon_bits: Option<f64>,
     pub user_tx_key: Option<String>,
     /// The gold-layer `user_transactions.kind` this tx belongs to (e.g.
     /// `"peg_in"`, `"ln_send"`), or `None` for CI items and orphan
@@ -393,6 +398,11 @@ pub struct TxDetail {
     pub inputs: Vec<TxItemPart>,
     pub outputs: Vec<TxItemPart>,
     pub user_tx_key: Option<String>,
+    /// Upper-bound anonymity-set estimate in bits (weakest-link over spent
+    /// ecash denominations), from `transaction_privacy`. `None` for
+    /// non-ecash-spending transactions or when no pool data exists before
+    /// the spend.
+    pub ecash_anon_bits: Option<f64>,
 }
 
 /// One fedimint transaction that is a member (leg) of a gold-layer user

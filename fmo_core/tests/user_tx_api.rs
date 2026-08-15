@@ -76,6 +76,31 @@ async fn tx_detail_and_user_transaction_assembly() {
     .await
     .unwrap();
 
+    // A second user transaction (e.g. a non-ecash kind).
+    conn.execute(
+        "INSERT INTO transactions (federation_id, txid, session_index, item_index, data)
+         VALUES ($1, $2, 0, 1, ''::bytea)",
+        &[&fed, &b"tx_wallet".to_vec()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO user_transactions
+             (federation_id, user_tx_key, kind, direction, amount_msat, fedimint_fee_msat,
+              num_fedimint_txs, first_session_index, first_timestamp, last_timestamp)
+         VALUES ($1, $2, 'wallet_deposit', 'in', 5000, 0, 1, 0, '2024-01-15 12:00:00+00', '2024-01-15 12:00:00+00')",
+        &[&fed, &b"tx_wallet".to_vec()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
+         VALUES ($1, $2, $2, 'self', 0)",
+        &[&fed, &b"tx_wallet".to_vec()],
+    )
+    .await
+    .unwrap();
+
     conn.execute(
         "INSERT INTO user_transaction_txs (federation_id, txid, user_tx_key, role, session_index)
          VALUES ($1, $2, $5, 'offer', 0),

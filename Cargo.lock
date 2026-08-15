@@ -2246,6 +2246,7 @@ dependencies = [
  "fedimint-dummy-common",
  "fedimint-meta-client",
  "fmo_api_types",
+ "fmo_core",
  "futures",
  "hex",
  "nostr-sdk",

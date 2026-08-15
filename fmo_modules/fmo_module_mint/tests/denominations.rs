@@ -44,10 +44,7 @@ async fn setup_mint_schema(pool: &deadpool_postgres::Pool) {
 /// response to the GLOBAL denomination set, zero-filling denominations this
 /// federation never used, with an `EXISTS` guard so a federation with no mint
 /// notes of its own returns an empty list.
-async fn read_denominations(
-    pool: &deadpool_postgres::Pool,
-    fed: &[u8],
-) -> Vec<(i64, i64, i64)> {
+async fn read_denominations(pool: &deadpool_postgres::Pool, fed: &[u8]) -> Vec<(i64, i64, i64)> {
     pool.get()
         .await
         .unwrap()

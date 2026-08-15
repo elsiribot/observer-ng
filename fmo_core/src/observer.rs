@@ -11,7 +11,7 @@ use fedimint_core::invite_code::InviteCode;
 use fedimint_core::task::TaskGroup;
 use tokio::sync::watch;
 use tokio_postgres::NoTls;
-use tracing::{error, info_span, Instrument};
+use tracing::{error, info_span, warn, Instrument};
 
 use crate::db::migrations::{setup_core_schema, setup_module_schema};
 use crate::federation::Federation;
@@ -172,6 +172,45 @@ impl FederationObserver {
                 let pool = observer.pool.clone();
                 async move { crate::api::consensus::ensure_infer_indexes(&pool).await }
             });
+
+        // One-time anon-set backfill: on the first boot after the v9 schema,
+        // `note_circulation` is empty, so reconstruct the full historical curve
+        // (reset-and-replay) and score every existing user transaction. On later
+        // boots the table is non-empty (maintained incrementally by the gold
+        // fold), so this skips. Runs in the background so the (full-history) scan
+        // never blocks startup; anon_bits are simply NULL until it completes.
+        observer.task_group.spawn_cancellable("anon-set backfill", {
+            let pool = observer.pool.clone();
+            async move {
+                let conn = match pool.get().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!("anon-set backfill: pool: {e:?}");
+                        return;
+                    }
+                };
+                let empty: bool = match conn
+                    .query_one("SELECT NOT EXISTS (SELECT 1 FROM note_circulation)", &[])
+                    .await
+                {
+                    Ok(row) => row.get(0),
+                    Err(e) => {
+                        warn!("anon-set backfill: probe: {e:?}");
+                        return;
+                    }
+                };
+                if !empty {
+                    return;
+                }
+                if let Err(e) = crate::gold::rebuild_note_circulation(&conn).await {
+                    warn!("anon-set backfill: rebuild_note_circulation: {e:?}");
+                    return;
+                }
+                if let Err(e) = crate::gold::backfill_ecash_anon_bits(&conn).await {
+                    warn!("anon-set backfill: score: {e:?}");
+                }
+            }
+        });
 
         Ok(observer)
     }

@@ -97,6 +97,7 @@ pub(super) struct ConsensusItemRow {
     kind: Option<String>,
     peer_id: Option<i32>,
     txid: Option<String>,
+    ecash_anon_bits: Option<f64>,
     user_tx_key: Option<String>,
     user_tx_kind: Option<String>,
     direction: Option<String>,
@@ -124,6 +125,7 @@ impl From<ConsensusItemRow> for SessionItem {
             kind: row.kind,
             peer_id: row.peer_id,
             txid: row.txid,
+            ecash_anon_bits: row.ecash_anon_bits,
             user_tx_key: row.user_tx_key,
             user_tx_kind: row.user_tx_kind,
             direction: row.direction,
@@ -149,6 +151,7 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
     SELECT t.session_index::bigint, t.item_index::bigint, 'transaction' AS item_type,
            NULL::text AS kind, NULL::int AS peer_id,
            encode(t.txid,'hex') AS txid,
+           tp.ecash_anon_bits AS ecash_anon_bits,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details,
            t.synced_at AS synced_at,
@@ -157,6 +160,7 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
            uxt.role
     FROM transactions t
     {USER_TX_LATERAL}
+    LEFT JOIN transaction_privacy tp ON tp.federation_id = t.federation_id AND tp.txid = t.txid
     LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
     WHERE t.federation_id = $1
       AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
@@ -178,12 +182,13 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
 static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details,
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, user_tx_key, user_tx_kind, direction, details,
            synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
+                 tp.ecash_anon_bits AS ecash_anon_bits,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
                  t.synced_at AS synced_at,
@@ -192,6 +197,7 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
                  uxt.role
           FROM transactions t
           {USER_TX_LATERAL}
+          LEFT JOIN transaction_privacy tp ON tp.federation_id = t.federation_id AND tp.txid = t.txid
           LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
           WHERE t.federation_id = $1
             AND ($2::int IS NULL OR (t.session_index, t.item_index) < ($2::int, $3::int))
@@ -199,7 +205,7 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
           LIMIT $4 )
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-                 NULL, NULL, NULL, NULL, ci.details,
+                 NULL, NULL::double precision, NULL, NULL, NULL, ci.details,
                  ci.synced_at,
                  st.estimated_session_timestamp,
                  st.next_vote_time,
@@ -220,7 +226,8 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
 // language=postgresql
 const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
-           NULL::text AS txid, NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
+           NULL::text AS txid, NULL::double precision AS ecash_anon_bits,
+           NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
            ci.details,
            ci.synced_at AS synced_at,
            st.estimated_session_timestamp AS estimated_session_timestamp,

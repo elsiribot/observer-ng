@@ -45,12 +45,13 @@ use crate::query::query;
 static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, user_tx_key, user_tx_kind, direction, details,
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, user_tx_key, user_tx_kind, direction, details,
            synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
+                 tp.ecash_anon_bits AS ecash_anon_bits,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
                  t.synced_at AS synced_at,
@@ -59,6 +60,7 @@ static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
                  uxt.role
           FROM transactions t
           {USER_TX_LATERAL}
+          LEFT JOIN transaction_privacy tp ON tp.federation_id = t.federation_id AND tp.txid = t.txid
           LEFT JOIN session_times st ON st.federation_id = t.federation_id AND st.session_index = t.session_index
           WHERE t.federation_id = $1
             AND ($2::int IS NULL OR (t.session_index, t.item_index) > ($2::int, $3::int))
@@ -67,7 +69,7 @@ static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
           LIMIT 10000 )
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-                 NULL, NULL, NULL, NULL, ci.details,
+                 NULL, NULL::double precision, NULL, NULL, NULL, ci.details,
                  ci.synced_at,
                  st.estimated_session_timestamp,
                  st.next_vote_time,

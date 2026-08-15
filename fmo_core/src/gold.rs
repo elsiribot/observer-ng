@@ -453,6 +453,11 @@ pub async fn fold_sessions(
     fold_standalone(dbtx, fed, start, end).await?;
     fold_ln(dbtx, fed, start, end).await?;
     estimate_ln_gateway_fees(dbtx, fed, start, end).await?;
+    // Extend the in-circulation curve for this range BEFORE scoring, so a tx at
+    // session s reads the (strictly-before) pool including this range's earlier
+    // sessions.
+    maintain_note_circulation(dbtx, fed, start, end).await?;
+    compute_ecash_anon_bits(dbtx, fed, start, end).await?;
     Ok(())
 }
 
@@ -532,6 +537,189 @@ pub async fn heal_gold(conn: &impl deadpool_postgres::GenericClient) -> anyhow::
     )
     .await?;
 
+    Ok(())
+}
+
+/// Resets and rebuilds the entire `note_circulation` curve from the append-only
+/// core tables: one change point per (federation, mint kind, denomination,
+/// session-with-activity) holding the cumulative (issued − spent) pool after
+/// that session. This is the one-time "reset and replay" backfill — the live
+/// cumulative counts are "now", not "at spend time", so the historical pool
+/// must be reconstructed from session 0. Deterministic and idempotent (a full
+/// DELETE + running-sum INSERT), safe to re-run. The INSERT upserts on
+/// conflict rather than assuming an empty table: a concurrently-running gold
+/// fold's `maintain_note_circulation` can commit a row for the same PK
+/// between this DELETE and INSERT, and since both compute identical absolute
+/// values from the same append-only core tables, converging via upsert is
+/// correct and avoids aborting this rebuild on a PK collision.
+pub async fn rebuild_note_circulation(
+    conn: &impl deadpool_postgres::GenericClient,
+) -> anyhow::Result<()> {
+    conn.batch_execute(
+        "DELETE FROM note_circulation;
+         INSERT INTO note_circulation
+             (federation_id, kind, denomination_msat, session_index, in_circulation)
+         SELECT federation_id, kind, denom, session_index,
+                SUM(delta) OVER (PARTITION BY federation_id, kind, denom
+                                 ORDER BY session_index
+                                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+         FROM (
+             SELECT federation_id, kind, denom, session_index, SUM(sgn) AS delta
+             FROM (
+                 SELECT o.federation_id, o.kind, o.amount_msat AS denom,
+                        t.session_index, 1 AS sgn
+                 FROM transaction_outputs o
+                 JOIN transactions t USING (federation_id, txid)
+                 WHERE o.kind IN ('mint','mintv2') AND o.amount_msat IS NOT NULL
+                 UNION ALL
+                 SELECT i.federation_id, i.kind, i.amount_msat,
+                        t.session_index, -1
+                 FROM transaction_inputs i
+                 JOIN transactions t USING (federation_id, txid)
+                 WHERE i.kind IN ('mint','mintv2') AND i.amount_msat IS NOT NULL
+             ) e
+             GROUP BY federation_id, kind, denom, session_index
+         ) per_session
+         ON CONFLICT (federation_id, kind, denomination_msat, session_index)
+             DO UPDATE SET in_circulation = EXCLUDED.in_circulation;",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Extends `note_circulation` for session range `[start, end)` for one
+/// federation, seeded from the latest change point strictly before `start` per
+/// (kind, denomination). Idempotent: the seed (< start) and the range's deltas
+/// are fixed, so re-running a range overwrites with identical values.
+pub async fn maintain_note_circulation(
+    dbtx: &Transaction<'_>,
+    fed: &[u8],
+    start: i32,
+    end: i32,
+) -> anyhow::Result<()> {
+    dbtx.execute(
+        "INSERT INTO note_circulation
+             (federation_id, kind, denomination_msat, session_index, in_circulation)
+         SELECT ps.federation_id, ps.kind, ps.denom, ps.session_index,
+                COALESCE(seed.base, 0)
+                  + SUM(ps.delta) OVER (PARTITION BY ps.kind, ps.denom
+                                        ORDER BY ps.session_index
+                                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+         FROM (
+             SELECT e.federation_id, e.kind, e.denom, e.session_index, SUM(e.sgn) AS delta
+             FROM (
+                 SELECT o.federation_id, o.kind, o.amount_msat AS denom, t.session_index, 1 AS sgn
+                 FROM transaction_outputs o JOIN transactions t USING (federation_id, txid)
+                 WHERE o.federation_id = $1 AND o.kind IN ('mint','mintv2')
+                   AND o.amount_msat IS NOT NULL
+                   AND t.session_index >= $2 AND t.session_index < $3
+                 UNION ALL
+                 SELECT i.federation_id, i.kind, i.amount_msat, t.session_index, -1
+                 FROM transaction_inputs i JOIN transactions t USING (federation_id, txid)
+                 WHERE i.federation_id = $1 AND i.kind IN ('mint','mintv2')
+                   AND i.amount_msat IS NOT NULL
+                   AND t.session_index >= $2 AND t.session_index < $3
+             ) e
+             GROUP BY e.federation_id, e.kind, e.denom, e.session_index
+         ) ps
+         LEFT JOIN LATERAL (
+             SELECT nc.in_circulation AS base FROM note_circulation nc
+             WHERE nc.federation_id = ps.federation_id AND nc.kind = ps.kind
+               AND nc.denomination_msat = ps.denom AND nc.session_index < $2
+             ORDER BY nc.session_index DESC LIMIT 1
+         ) seed ON true
+         ON CONFLICT (federation_id, kind, denomination_msat, session_index)
+             DO UPDATE SET in_circulation = EXCLUDED.in_circulation",
+        &[&fed, &start, &end],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Populates `transaction_privacy` for every ecash-spending fedimint
+/// transaction (keyed by `txid`) from the `note_circulation` curve: the min
+/// over the transaction's spent (kind, denomination) of `log₂(N)`, where N is
+/// the same-kind same-denomination pool (crowd of possible spenders) STRICTLY
+/// BEFORE the transaction's session. The min is the tight, safe upper bound (a
+/// transaction is only as private as its scarcest spent denomination). Keying
+/// by `txid` covers ecash transfers, on-chain withdrawals, and Lightning fund
+/// legs uniformly. Idempotent (deterministic upsert from the curve).
+pub async fn backfill_ecash_anon_bits(
+    conn: &impl deadpool_postgres::GenericClient,
+) -> anyhow::Result<()> {
+    let sql = ECASH_ANON_BITS_SQL.replace("{tx_filter}", "");
+    conn.execute(&sql, &[]).await?;
+    Ok(())
+}
+
+/// Shared scoring upsert (into `transaction_privacy`, keyed by `txid`).
+/// `{tx_filter}` is replaced with `""` for the full-table heal, or a
+/// `(federation, [start,end))` predicate on `tx_denoms` (reusing
+/// `$1`/`$2`/`$3`) by the forward variant in `compute_ecash_anon_bits` —
+/// scoping the otherwise unfiltered `tx_denoms`/`pool`/`bits` CTEs so the
+/// incremental gold fold doesn't rescan the federation's entire
+/// `transaction_inputs` history every batch. Keying the upsert by `txid`
+/// (rather than joining the dedup'd `user_transactions` by `user_tx_key`) means
+/// every fedimint transaction that spends ecash is scored, including Lightning
+/// `fund` legs (which are contract_id-grained in the gold layer and would
+/// otherwise be missed). Use `.replace(...)`, not `format!`, to avoid
+/// brace-escaping the rest of the query.
+const ECASH_ANON_BITS_SQL: &str = "
+    WITH tx_denoms AS (
+        SELECT DISTINCT ti.federation_id, ti.txid, t.session_index, ti.kind,
+               ti.amount_msat AS denom
+        FROM transaction_inputs ti
+        JOIN transactions t USING (federation_id, txid)
+        WHERE ti.kind IN ('mint','mintv2') AND ti.amount_msat IS NOT NULL {tx_filter}
+    ),
+    pool AS (
+        SELECT d.federation_id, d.txid,
+               (SELECT nc.in_circulation FROM note_circulation nc
+                 WHERE nc.federation_id = d.federation_id AND nc.kind = d.kind
+                   AND nc.denomination_msat = d.denom
+                   AND nc.session_index < d.session_index
+                 ORDER BY nc.session_index DESC LIMIT 1) AS n
+        FROM tx_denoms d
+    ),
+    bits AS (
+        -- Anonymity set = crowd of possible spenders = the in-circulation pool
+        -- of this (kind, denomination) at spend time; log2. Independent of how
+        -- MANY notes of it the transaction spends: the spender hides among the
+        -- N holders whether they move one note or many. (An earlier version
+        -- summed a falling factorial over the note count q, which measured
+        -- \"which specific notes\" rather than \"which spender\" and blew up for
+        -- consolidation spends of many notes of one denomination.)
+        SELECT federation_id, txid, log(2.0, n) AS bits_d
+        FROM pool WHERE n IS NOT NULL AND n > 0
+    ),
+    scored AS (
+        SELECT federation_id, txid, MIN(bits_d) AS min_bits
+        FROM bits GROUP BY federation_id, txid
+    )
+    INSERT INTO transaction_privacy (federation_id, txid, ecash_anon_bits)
+    SELECT federation_id, txid, min_bits FROM scored
+    ON CONFLICT (federation_id, txid) DO UPDATE
+        SET ecash_anon_bits = EXCLUDED.ecash_anon_bits
+";
+
+/// Scores `transaction_privacy` for the fedimint transactions in session range
+/// `[start, end)` — the forward analogue of `backfill_ecash_anon_bits`, run
+/// inside the gold fold after `maintain_note_circulation`. The `{tx_filter}`
+/// scopes the `tx_denoms` CTE to this federation and range so the incremental
+/// fold doesn't rescan the federation's entire `transaction_inputs` history
+/// each batch (the upsert into `transaction_privacy` is keyed by `txid`, so
+/// scoping the candidate txids is all that's needed).
+async fn compute_ecash_anon_bits(
+    dbtx: &Transaction<'_>,
+    fed: &[u8],
+    start: i32,
+    end: i32,
+) -> anyhow::Result<()> {
+    let sql = ECASH_ANON_BITS_SQL.replace(
+        "{tx_filter}",
+        " AND ti.federation_id = $1 AND t.session_index >= $2 AND t.session_index < $3",
+    );
+    dbtx.execute(&sql, &[&fed, &start, &end]).await?;
     Ok(())
 }
 

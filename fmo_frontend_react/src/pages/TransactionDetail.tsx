@@ -6,6 +6,7 @@ import { Alert } from '../components/Alert';
 import { Badge } from '../components/Badge';
 import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
 import { asSats, formatNumber } from '../utils/format';
+import { formatAnonSet } from '../utils/anonSet';
 
 // Transaction-detail page: the structured inputs/outputs of one fedimint
 // transaction, drilled into from a session's item list or the consensus
@@ -89,6 +90,20 @@ export function TransactionDetail() {
       <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6">
         Session {formatNumber(detail.session_index)} · Item {formatNumber(detail.item_index)}
       </div>
+
+      {formatAnonSet(detail.ecash_anon_bits) !== null && (
+        <div className="mb-6 sm:mb-8">
+          <div className="uppercase text-xs text-gray-400 dark:text-gray-500 mb-1">
+            Anonymity Set (estimated)
+          </div>
+          <span
+            title="Upper-bound ecash anonymity set — the transaction hides among ~this many spenders of its scarcest spent denomination."
+            className="cursor-help text-sm sm:text-base text-gray-900 dark:text-white"
+          >
+            {formatAnonSet(detail.ecash_anon_bits)}
+          </span>
+        </div>
+      )}
 
       {detail.user_tx_key && (
         <Link

@@ -155,8 +155,9 @@ enum NoteDirection {
 
 /// Increment the per-denomination note counter for one processed note. Runs on
 /// `ctx.dbtx`, so it commits atomically with the module cursor (exactly-once
-/// per note; see `dispatch::process_module_batch`). The `search_path` is already
-/// set to the `fmo_mintv2` schema for the duration of the batch transaction.
+/// per note; see `dispatch::process_module_batch`). The `search_path` is
+/// already set to the `fmo_mintv2` schema for the duration of the batch
+/// transaction.
 async fn count_note(
     ctx: &mut ProcessCtx<'_>,
     federation_id: FederationId,

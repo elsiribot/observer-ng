@@ -225,6 +225,9 @@ export interface SessionItem {
   kind: string | null;
   peer_id: number | null;
   txid: string | null;
+  /** Upper-bound ecash anonymity-set estimate (log2 of the weakest-link
+   * in-circulation pool), null for non-ecash items or when not applicable. */
+  ecash_anon_bits: number | null;
   user_tx_key: string | null;
   /** The gold-layer user transaction's `kind` (e.g. "peg_in", "ln_send"),
    * or null for CI items and transactions not (yet) folded into a user
@@ -280,6 +283,9 @@ export interface TxDetail {
   inputs: TxItemPart[];
   outputs: TxItemPart[];
   user_tx_key: string | null;
+  /** Upper-bound ecash anonymity-set estimate (log2 of the weakest-link
+   * in-circulation pool), null when not applicable. */
+  ecash_anon_bits: number | null;
 }
 
 /// One fedimint transaction that is a member (leg) of a gold-layer user
