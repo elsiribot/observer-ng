@@ -206,7 +206,7 @@ impl FederationObserver {
                     warn!("anon-set backfill: rebuild_note_circulation: {e:?}");
                     return;
                 }
-                if let Err(e) = crate::gold::backfill_ecash_anon_bits(&conn).await {
+                if let Err(e) = crate::gold::backfill_transaction_privacy(&conn).await {
                     warn!("anon-set backfill: score: {e:?}");
                 }
             }

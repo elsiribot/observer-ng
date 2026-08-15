@@ -45,13 +45,14 @@ use crate::query::query;
 static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, user_tx_key, user_tx_kind, direction, details,
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, ecash_issuance_bits, user_tx_key, user_tx_kind, direction, details,
            synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  tp.ecash_anon_bits AS ecash_anon_bits,
+                 tp.ecash_issuance_bits AS ecash_issuance_bits,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
                  t.synced_at AS synced_at,
@@ -69,7 +70,7 @@ static LIVE_QUERY: LazyLock<String> = LazyLock::new(|| {
           LIMIT 10000 )
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-                 NULL, NULL::double precision, NULL, NULL, NULL, ci.details,
+                 NULL, NULL::double precision, NULL::double precision, NULL, NULL, NULL, ci.details,
                  ci.synced_at,
                  st.estimated_session_timestamp,
                  st.next_vote_time,

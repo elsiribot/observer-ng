@@ -334,6 +334,11 @@ pub struct SessionItem {
     /// `transaction_privacy`. `None` for CI items, non-ecash-spending
     /// transactions, or when no pool data exists before the spend.
     pub ecash_anon_bits: Option<f64>,
+    /// Issuance-side anonymity estimate in bits: the crowd of same-
+    /// denomination notes this transaction's freshly-minted notes join.
+    /// Forward-looking and weaker than `ecash_anon_bits`. `None` for CI
+    /// items, non-issuing transactions, or when no pool data exists.
+    pub ecash_issuance_bits: Option<f64>,
     pub user_tx_key: Option<String>,
     /// The gold-layer `user_transactions.kind` this tx belongs to (e.g.
     /// `"peg_in"`, `"ln_send"`), or `None` for CI items and orphan
@@ -403,6 +408,11 @@ pub struct TxDetail {
     /// non-ecash-spending transactions or when no pool data exists before
     /// the spend.
     pub ecash_anon_bits: Option<f64>,
+    /// Issuance-side anonymity estimate in bits: the crowd of same-
+    /// denomination notes this transaction's freshly-minted notes join.
+    /// Forward-looking and weaker than `ecash_anon_bits`. `None` for
+    /// non-issuing transactions or when no pool data exists.
+    pub ecash_issuance_bits: Option<f64>,
 }
 
 /// One fedimint transaction that is a member (leg) of a gold-layer user

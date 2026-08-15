@@ -457,7 +457,7 @@ pub async fn fold_sessions(
     // session s reads the (strictly-before) pool including this range's earlier
     // sessions.
     maintain_note_circulation(dbtx, fed, start, end).await?;
-    compute_ecash_anon_bits(dbtx, fed, start, end).await?;
+    compute_transaction_privacy(dbtx, fed, start, end).await?;
     Ok(())
 }
 
@@ -636,41 +636,56 @@ pub async fn maintain_note_circulation(
     Ok(())
 }
 
-/// Populates `transaction_privacy` for every ecash-spending fedimint
-/// transaction (keyed by `txid`) from the `note_circulation` curve: the min
-/// over the transaction's spent (kind, denomination) of `log₂(N)`, where N is
-/// the same-kind same-denomination pool (crowd of possible spenders) STRICTLY
-/// BEFORE the transaction's session. The min is the tight, safe upper bound (a
-/// transaction is only as private as its scarcest spent denomination). Keying
-/// by `txid` covers ecash transfers, on-chain withdrawals, and Lightning fund
-/// legs uniformly. Idempotent (deterministic upsert from the curve).
-pub async fn backfill_ecash_anon_bits(
+/// Populates `transaction_privacy` for every fedimint transaction that spends
+/// and/or issues ecash (keyed by `txid`) from the `note_circulation` curve.
+///
+/// Two symmetric columns, both `min over the transaction's (kind, denomination)
+/// of log₂(N)` where N is that pool STRICTLY BEFORE the transaction's session:
+/// - `ecash_anon_bits` over spent notes (`transaction_inputs`): the crowd of
+///   possible *spenders* of the scarcest spent denomination — realized
+///   blind-signature unlinkability. Covers ecash transfers, on-chain
+///   withdrawals and Lightning fund legs (keying by `txid`, not the dedup'd
+///   `user_transactions.user_tx_key`, is what covers Lightning).
+/// - `ecash_issuance_bits` over minted notes (`transaction_outputs`): the crowd
+///   the freshly-minted notes are minted *into*. A forward-looking snapshot
+///   (the note's realized anonymity happens at its future spend), so a weaker
+///   notion than the spend side; it gives peg-ins / receives a figure.
+///
+/// A row exists if the transaction spends and/or issues ecash; either column is
+/// NULL when that side doesn't apply. Idempotent (deterministic upserts).
+pub async fn backfill_transaction_privacy(
     conn: &impl deadpool_postgres::GenericClient,
 ) -> anyhow::Result<()> {
-    let sql = ECASH_ANON_BITS_SQL.replace("{tx_filter}", "");
-    conn.execute(&sql, &[]).await?;
+    conn.execute(
+        &ecash_bits_sql("transaction_inputs", "ecash_anon_bits", ""),
+        &[],
+    )
+    .await?;
+    conn.execute(
+        &ecash_bits_sql("transaction_outputs", "ecash_issuance_bits", ""),
+        &[],
+    )
+    .await?;
     Ok(())
 }
 
-/// Shared scoring upsert (into `transaction_privacy`, keyed by `txid`).
-/// `{tx_filter}` is replaced with `""` for the full-table heal, or a
+/// Builds a scoring upsert into `transaction_privacy` (keyed by `txid`) for one
+/// side: `source_table` is `transaction_inputs` (spend → `target_col`
+/// `ecash_anon_bits`) or `transaction_outputs` (issuance →
+/// `ecash_issuance_bits`). `tx_filter` is `""` for the full-table heal, or a
 /// `(federation, [start,end))` predicate on `tx_denoms` (reusing
-/// `$1`/`$2`/`$3`) by the forward variant in `compute_ecash_anon_bits` —
-/// scoping the otherwise unfiltered `tx_denoms`/`pool`/`bits` CTEs so the
-/// incremental gold fold doesn't rescan the federation's entire
-/// `transaction_inputs` history every batch. Keying the upsert by `txid`
-/// (rather than joining the dedup'd `user_transactions` by `user_tx_key`) means
-/// every fedimint transaction that spends ecash is scored, including Lightning
-/// `fund` legs (which are contract_id-grained in the gold layer and would
-/// otherwise be missed). Use `.replace(...)`, not `format!`, to avoid
-/// brace-escaping the rest of the query.
-const ECASH_ANON_BITS_SQL: &str = "
+/// `$1`/`$2`/`$3`) for the incremental forward path, so the gold fold doesn't
+/// rescan the federation's entire history each batch. All inputs are trusted
+/// constants (not user data) — no SQL injection surface.
+fn ecash_bits_sql(source_table: &str, target_col: &str, tx_filter: &str) -> String {
+    format!(
+        "
     WITH tx_denoms AS (
-        SELECT DISTINCT ti.federation_id, ti.txid, t.session_index, ti.kind,
-               ti.amount_msat AS denom
-        FROM transaction_inputs ti
+        SELECT DISTINCT io.federation_id, io.txid, t.session_index, io.kind,
+               io.amount_msat AS denom
+        FROM {source_table} io
         JOIN transactions t USING (federation_id, txid)
-        WHERE ti.kind IN ('mint','mintv2') AND ti.amount_msat IS NOT NULL {tx_filter}
+        WHERE io.kind IN ('mint','mintv2') AND io.amount_msat IS NOT NULL {tx_filter}
     ),
     pool AS (
         SELECT d.federation_id, d.txid,
@@ -681,14 +696,9 @@ const ECASH_ANON_BITS_SQL: &str = "
                  ORDER BY nc.session_index DESC LIMIT 1) AS n
         FROM tx_denoms d
     ),
+    -- crowd = the in-circulation pool of this (kind, denomination); log2.
+    -- Independent of how many notes of it the transaction moves.
     bits AS (
-        -- Anonymity set = crowd of possible spenders = the in-circulation pool
-        -- of this (kind, denomination) at spend time; log2. Independent of how
-        -- MANY notes of it the transaction spends: the spender hides among the
-        -- N holders whether they move one note or many. (An earlier version
-        -- summed a falling factorial over the note count q, which measured
-        -- \"which specific notes\" rather than \"which spender\" and blew up for
-        -- consolidation spends of many notes of one denomination.)
         SELECT federation_id, txid, log(2.0, n) AS bits_d
         FROM pool WHERE n IS NOT NULL AND n > 0
     ),
@@ -696,30 +706,36 @@ const ECASH_ANON_BITS_SQL: &str = "
         SELECT federation_id, txid, MIN(bits_d) AS min_bits
         FROM bits GROUP BY federation_id, txid
     )
-    INSERT INTO transaction_privacy (federation_id, txid, ecash_anon_bits)
+    INSERT INTO transaction_privacy (federation_id, txid, {target_col})
     SELECT federation_id, txid, min_bits FROM scored
     ON CONFLICT (federation_id, txid) DO UPDATE
-        SET ecash_anon_bits = EXCLUDED.ecash_anon_bits
-";
+        SET {target_col} = EXCLUDED.{target_col}
+"
+    )
+}
 
-/// Scores `transaction_privacy` for the fedimint transactions in session range
-/// `[start, end)` — the forward analogue of `backfill_ecash_anon_bits`, run
-/// inside the gold fold after `maintain_note_circulation`. The `{tx_filter}`
-/// scopes the `tx_denoms` CTE to this federation and range so the incremental
-/// fold doesn't rescan the federation's entire `transaction_inputs` history
-/// each batch (the upsert into `transaction_privacy` is keyed by `txid`, so
-/// scoping the candidate txids is all that's needed).
-async fn compute_ecash_anon_bits(
+/// Scores `transaction_privacy` (both spend and issuance sides) for the
+/// fedimint transactions in session range `[start, end)` — the forward analogue
+/// of `backfill_transaction_privacy`, run inside the gold fold after
+/// `maintain_note_circulation`.
+async fn compute_transaction_privacy(
     dbtx: &Transaction<'_>,
     fed: &[u8],
     start: i32,
     end: i32,
 ) -> anyhow::Result<()> {
-    let sql = ECASH_ANON_BITS_SQL.replace(
-        "{tx_filter}",
-        " AND ti.federation_id = $1 AND t.session_index >= $2 AND t.session_index < $3",
-    );
-    dbtx.execute(&sql, &[&fed, &start, &end]).await?;
+    const FILTER: &str =
+        " AND io.federation_id = $1 AND t.session_index >= $2 AND t.session_index < $3";
+    dbtx.execute(
+        &ecash_bits_sql("transaction_inputs", "ecash_anon_bits", FILTER),
+        &[&fed, &start, &end],
+    )
+    .await?;
+    dbtx.execute(
+        &ecash_bits_sql("transaction_outputs", "ecash_issuance_bits", FILTER),
+        &[&fed, &start, &end],
+    )
+    .await?;
     Ok(())
 }
 

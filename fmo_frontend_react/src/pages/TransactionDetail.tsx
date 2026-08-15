@@ -105,6 +105,20 @@ export function TransactionDetail() {
         </div>
       )}
 
+      {formatAnonSet(detail.ecash_issuance_bits) !== null && (
+        <div className="mb-6 sm:mb-8">
+          <div className="uppercase text-xs text-gray-400 dark:text-gray-500 mb-1">
+            Issuance Crowd (estimated)
+          </div>
+          <span
+            title="Issuance-side estimate — the crowd of same-denomination notes this transaction's freshly-minted notes join. Forward-looking; weaker than the spend-side figure."
+            className="cursor-help text-sm sm:text-base text-gray-900 dark:text-white"
+          >
+            {formatAnonSet(detail.ecash_issuance_bits)}
+          </span>
+        </div>
+      )}
+
       {detail.user_tx_key && (
         <Link
           to={`/federations/${id}/user-transactions/${detail.user_tx_key}`}

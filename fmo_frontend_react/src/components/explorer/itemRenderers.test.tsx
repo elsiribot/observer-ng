@@ -22,6 +22,7 @@ const baseItem: SessionItem = {
   peer_id: null,
   txid: null,
   ecash_anon_bits: null,
+  ecash_issuance_bits: null,
   user_tx_key: null,
   user_tx_kind: null,
   direction: null,
@@ -250,6 +251,7 @@ describe('TxDetailBody', () => {
       outputs,
       user_tx_key: null,
       ecash_anon_bits: null,
+      ecash_issuance_bits: null,
     };
   }
 

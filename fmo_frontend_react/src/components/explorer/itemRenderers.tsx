@@ -263,6 +263,14 @@ function TransactionRow({ item }: { item: SessionItem }) {
             {formatAnonSet(item.ecash_anon_bits)}
           </span>
         )}
+        {item.ecash_issuance_bits != null && (
+          <span
+            className="text-xs text-indigo-400 dark:text-indigo-400/80 shrink-0"
+            title="Issuance-side estimate — the crowd of same-denomination notes this transaction's freshly-minted notes join. Forward-looking; weaker than the spend-side figure."
+          >
+            mint {formatAnonSet(item.ecash_issuance_bits)}
+          </span>
+        )}
         {item.user_tx_key && federationId && (
           <Link
             to={`/federations/${federationId}/user-transactions/${item.user_tx_key}`}

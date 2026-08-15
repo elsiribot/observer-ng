@@ -160,7 +160,7 @@ async fn backfill_scores_min_over_denominations() {
     .await
     .unwrap();
 
-    fmo_core::gold::backfill_ecash_anon_bits(&conn)
+    fmo_core::gold::backfill_transaction_privacy(&conn)
         .await
         .unwrap();
 
@@ -432,7 +432,7 @@ async fn scoring_ignores_note_count_per_denomination() {
         .unwrap();
     }
 
-    fmo_core::gold::backfill_ecash_anon_bits(&conn)
+    fmo_core::gold::backfill_transaction_privacy(&conn)
         .await
         .unwrap();
 
@@ -494,7 +494,7 @@ async fn scores_by_txid_without_a_user_transaction() {
     .unwrap();
     // Deliberately NO user_transactions row for this txid.
 
-    fmo_core::gold::backfill_ecash_anon_bits(&conn)
+    fmo_core::gold::backfill_transaction_privacy(&conn)
         .await
         .unwrap();
 
@@ -509,4 +509,76 @@ async fn scores_by_txid_without_a_user_transaction() {
         .unwrap()
         .map(|row| row.get(0));
     assert!((bits.unwrap() - 4.0).abs() < 1e-9, "got {bits:?}");
+}
+
+/// A transaction that only ISSUES ecash (mint outputs, no mint inputs) — e.g. a
+/// peg-in / receive — gets an `ecash_issuance_bits` figure (the crowd its
+/// minted notes join = min over output denominations of log2(pool strictly
+/// before its session)) and a NULL `ecash_anon_bits` (it spends no ecash).
+#[tokio::test]
+async fn scores_issuance_side_for_minting_tx() {
+    let _g = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+    let (config, fid) = minimal_config();
+    insert_federation(&pool, &config, fid).await;
+    let fed = fid.consensus_encode_to_vec();
+    let conn = pool.get().await.unwrap();
+
+    // Pool of denom 1000 (mint) before session 5: 32 in circulation.
+    conn.execute(
+        "INSERT INTO note_circulation VALUES ($1,'mint',1000,0,32)",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions VALUES ($1,5,''::bytea) ON CONFLICT DO NOTHING",
+        &[&fed],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transactions VALUES ($1,$2,5,0,''::bytea)",
+        &[&fed, &[11u8; 32].as_slice()],
+    )
+    .await
+    .unwrap();
+    // Mints two 1000-notes; spends nothing.
+    for out_index in 0..2i32 {
+        conn.execute(
+            "INSERT INTO transaction_outputs VALUES ($1,$2,$3,'mint',1000,NULL)",
+            &[&fed, &[11u8; 32].as_slice(), &out_index],
+        )
+        .await
+        .unwrap();
+    }
+
+    fmo_core::gold::backfill_transaction_privacy(&conn)
+        .await
+        .unwrap();
+
+    let row = conn
+        .query_opt(
+            "SELECT ecash_anon_bits, ecash_issuance_bits FROM transaction_privacy
+             WHERE federation_id=$1 AND txid=$2",
+            &[&fed, &[11u8; 32].as_slice()],
+        )
+        .await
+        .unwrap()
+        .expect("a transaction_privacy row for the minting tx");
+    let anon: Option<f64> = row.get(0);
+    let issuance: Option<f64> = row.get(1);
+    // Spends no ecash -> NULL spend score; mints into a pool of 32 -> log2(32) = 5.
+    assert!(
+        anon.is_none(),
+        "expected NULL ecash_anon_bits, got {anon:?}"
+    );
+    assert!(
+        (issuance.unwrap() - 5.0).abs() < 1e-9,
+        "expected 5.0 issuance bits, got {issuance:?}"
+    );
 }

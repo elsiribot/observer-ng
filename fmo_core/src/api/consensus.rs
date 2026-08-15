@@ -98,6 +98,7 @@ pub(super) struct ConsensusItemRow {
     peer_id: Option<i32>,
     txid: Option<String>,
     ecash_anon_bits: Option<f64>,
+    ecash_issuance_bits: Option<f64>,
     user_tx_key: Option<String>,
     user_tx_kind: Option<String>,
     direction: Option<String>,
@@ -126,6 +127,7 @@ impl From<ConsensusItemRow> for SessionItem {
             peer_id: row.peer_id,
             txid: row.txid,
             ecash_anon_bits: row.ecash_anon_bits,
+            ecash_issuance_bits: row.ecash_issuance_bits,
             user_tx_key: row.user_tx_key,
             user_tx_kind: row.user_tx_kind,
             direction: row.direction,
@@ -152,6 +154,7 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
            NULL::text AS kind, NULL::int AS peer_id,
            encode(t.txid,'hex') AS txid,
            tp.ecash_anon_bits AS ecash_anon_bits,
+           tp.ecash_issuance_bits AS ecash_issuance_bits,
            uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
            NULL::jsonb AS details,
            t.synced_at AS synced_at,
@@ -182,13 +185,14 @@ static TRANSACTION_ONLY_QUERY: LazyLock<String> = LazyLock::new(|| {
 static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
     format!(
         "
-    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, user_tx_key, user_tx_kind, direction, details,
+    SELECT session_index, item_index, item_type, kind, peer_id, txid, ecash_anon_bits, ecash_issuance_bits, user_tx_key, user_tx_kind, direction, details,
            synced_at, estimated_session_timestamp, next_vote_time, role
     FROM (
         ( SELECT t.session_index::bigint AS session_index, t.item_index::bigint AS item_index,
                  'transaction' AS item_type, NULL::text AS kind, NULL::int AS peer_id,
                  encode(t.txid,'hex') AS txid,
                  tp.ecash_anon_bits AS ecash_anon_bits,
+                 tp.ecash_issuance_bits AS ecash_issuance_bits,
                  uxt.user_tx_key, uxt.user_tx_kind, uxt.direction,
                  NULL::jsonb AS details,
                  t.synced_at AS synced_at,
@@ -205,7 +209,7 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
           LIMIT $4 )
         UNION ALL
         ( SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci', ci.kind, ci.peer_id,
-                 NULL, NULL::double precision, NULL, NULL, NULL, ci.details,
+                 NULL, NULL::double precision, NULL::double precision, NULL, NULL, NULL, ci.details,
                  ci.synced_at,
                  st.estimated_session_timestamp,
                  st.next_vote_time,
@@ -227,6 +231,7 @@ static ALL_QUERY: LazyLock<String> = LazyLock::new(|| {
 const KIND_QUERY: &str = "
     SELECT ci.session_index::bigint, ci.item_index::bigint, 'ci' AS item_type, ci.kind, ci.peer_id,
            NULL::text AS txid, NULL::double precision AS ecash_anon_bits,
+           NULL::double precision AS ecash_issuance_bits,
            NULL::text AS user_tx_key, NULL::text AS user_tx_kind, NULL::text AS direction,
            ci.details,
            ci.synced_at AS synced_at,
