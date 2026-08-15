@@ -10,7 +10,10 @@ use fedimint_core::config::{FederationId, JsonClientConfig};
 use fedimint_core::encoding::Encodable;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::Amount;
-use fmo_api_types::{FederationActivity, FederationHealth, FederationSummary, FedimintTotals};
+use fmo_api_types::{
+    EcashAnonPercentile, EcashAnonPoint, EcashAnonScatter, FederationActivity, FederationHealth,
+    FederationSummary, FedimintTotals,
+};
 use futures::future::join_all;
 use postgres_from_row::FromRow;
 use serde::Deserialize;
@@ -85,6 +88,10 @@ pub fn get_federations_routes() -> Router<AppState> {
         .route(
             "/:federation_id/consensus",
             get(super::consensus::consensus_stream),
+        )
+        .route(
+            "/:federation_id/ecash/anon-scatter",
+            get(get_federation_ecash_scatter),
         )
         .route("/:federation_id/live", get(super::live::federation_live))
         .route("/:federation_id/backfill", post(backfill_federation))
@@ -251,6 +258,14 @@ async fn get_federation_overview(
         "total_assets_msat": total_assets_msat
     })
     .into())
+}
+
+async fn get_federation_ecash_scatter(
+    Path(federation_id): Path<FederationId>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl IntoResponse> {
+    let scatter = state.observer.ecash_anon_scatter(federation_id).await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(scatter)))
 }
 
 async fn get_federation_totals(
@@ -706,6 +721,104 @@ impl FederationObserver {
             federations: (totals.federations as u64) - offline_federations,
             tx_count: totals.tx_count as u64,
             tx_volume: Amount::from_msats(totals.tx_volume as u64),
+        })
+    }
+
+    /// Scatter-plot data for ecash-spend anonymity over time (Ecash tab):
+    /// a random sample (capped at 4000) of per-transaction spend-side
+    /// `ecash_anon_bits` points, plus rolling-7d p10/p50/p90 percentile
+    /// lines, both timestamped via `session_times.estimated_session_timestamp`.
+    ///
+    /// The percentile query computes the rolling window by exploding each
+    /// point into the (up to) 7 day-buckets whose trailing 7-day window it
+    /// falls in, then grouping by bucket day — O(7 × points) rather than a
+    /// per-day lateral rescan of the whole table.
+    pub async fn ecash_anon_scatter(
+        &self,
+        federation_id: FederationId,
+    ) -> anyhow::Result<EcashAnonScatter> {
+        let fed = federation_id.consensus_encode_to_vec();
+        let conn = self.connection().await?;
+
+        #[derive(Debug, FromRow)]
+        struct PointRow {
+            t: i64,
+            bits: f64,
+        }
+
+        // language=postgresql
+        let points = query::<PointRow>(
+            &conn,
+            "
+            SELECT extract(epoch FROM st.estimated_session_timestamp)::bigint AS t,
+                   tp.ecash_anon_bits AS bits
+            FROM transaction_privacy tp
+            JOIN transactions tr USING (federation_id, txid)
+            JOIN session_times st ON st.federation_id = tr.federation_id
+                                  AND st.session_index = tr.session_index
+            WHERE tp.federation_id = $1 AND tp.ecash_anon_bits IS NOT NULL
+              AND st.estimated_session_timestamp IS NOT NULL
+            ORDER BY random() LIMIT 4000
+            ",
+            &[&fed],
+        )
+        .await?;
+
+        #[derive(Debug, FromRow)]
+        struct PercentileRow {
+            t: i64,
+            p10: f64,
+            p50: f64,
+            p90: f64,
+        }
+
+        // language=postgresql
+        let percentiles = query::<PercentileRow>(
+            &conn,
+            "
+            WITH pts AS (
+                SELECT st.estimated_session_timestamp AS ts, tp.ecash_anon_bits AS bits
+                FROM transaction_privacy tp
+                JOIN transactions tr USING (federation_id, txid)
+                JOIN session_times st ON st.federation_id = tr.federation_id
+                                      AND st.session_index = tr.session_index
+                WHERE tp.federation_id = $1 AND tp.ecash_anon_bits IS NOT NULL
+                  AND st.estimated_session_timestamp IS NOT NULL
+            ),
+            exploded AS (
+                SELECT gs.day, p.bits
+                FROM pts p
+                CROSS JOIN LATERAL generate_series(date_trunc('day', p.ts),
+                                                   date_trunc('day', p.ts) + interval '6 days',
+                                                   interval '1 day') AS gs(day)
+            )
+            SELECT extract(epoch FROM day)::bigint AS t,
+                   percentile_cont(0.1) WITHIN GROUP (ORDER BY bits) AS p10,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY bits) AS p50,
+                   percentile_cont(0.9) WITHIN GROUP (ORDER BY bits) AS p90
+            FROM exploded GROUP BY day ORDER BY day
+            ",
+            &[&fed],
+        )
+        .await?;
+
+        Ok(EcashAnonScatter {
+            points: points
+                .into_iter()
+                .map(|r| EcashAnonPoint {
+                    t: r.t,
+                    bits: r.bits,
+                })
+                .collect(),
+            percentiles: percentiles
+                .into_iter()
+                .map(|r| EcashAnonPercentile {
+                    t: r.t,
+                    p10: r.p10,
+                    p50: r.p50,
+                    p90: r.p90,
+                })
+                .collect(),
         })
     }
 }

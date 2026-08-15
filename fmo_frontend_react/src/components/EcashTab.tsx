@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../services/api';
-import type { MintDenomination } from '../types/api';
+import type { EcashAnonScatter, MintDenomination } from '../types/api';
 import { asBitcoin } from '../utils/format';
+import { EcashAnonScatterChart } from './EcashAnonScatterChart';
 import { EcashDenominationsChart } from './EcashDenominationsChart';
 
 interface EcashTabProps {
@@ -39,6 +40,36 @@ export function EcashTab({ federationId }: EcashTabProps) {
   const [modules, setModules] = useState<MintModule[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Fetched and loaded independently from the denomination histogram above:
+  // a slow/failing anon-scatter query shouldn't block the (usually cheap)
+  // histogram from rendering.
+  const [scatter, setScatter] = useState<EcashAnonScatter | null>(null);
+  const [scatterLoading, setScatterLoading] = useState(true);
+  const [scatterError, setScatterError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setScatterLoading(true);
+    setScatterError(null);
+    api
+      .getEcashAnonScatter(federationId)
+      .then((data) => {
+        if (!cancelled) {
+          setScatter(data);
+          setScatterLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setScatterError(err instanceof Error ? err.message : 'Failed to load anonymity data');
+          setScatterLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [federationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,6 +143,36 @@ export function EcashTab({ federationId }: EcashTabProps) {
             data={module.data}
           />
         ))}
+      </div>
+
+      <div className="mt-8">
+        <h3 className="mb-1 text-sm font-semibold text-gray-900 dark:text-white">
+          Transaction anonymity over time
+        </h3>
+        <div className="mb-3 text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+          Each dot is an ecash-spending transaction&apos;s upper-bound anonymity set; lines are
+          rolling 7-day percentiles.
+        </div>
+
+        {scatterLoading && (
+          <div className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+            Loading anonymity data…
+          </div>
+        )}
+
+        {!scatterLoading && scatterError && (
+          <div className="py-10 text-center text-sm text-red-500">Error: {scatterError}</div>
+        )}
+
+        {!scatterLoading && !scatterError && (!scatter || scatter.points.length === 0) && (
+          <div className="py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+            No anonymity data yet
+          </div>
+        )}
+
+        {!scatterLoading && !scatterError && scatter && scatter.points.length > 0 && (
+          <EcashAnonScatterChart data={scatter} />
+        )}
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import type {
   ConsensusPage,
+  EcashAnonScatter,
   FedimintTotals,
   FederationSummary,
   FederationUptime,
@@ -187,6 +188,11 @@ export const api = {
   // Ecash tab fetches both and renders whichever return data.
   getMintV2Denominations: (federationId: string) =>
     request<MintDenomination[]>(`/federations/${federationId}/modules/mintv2/denominations`),
+
+  // Ecash-spend anonymity scatter data (Ecash tab): a random sample of
+  // per-transaction anon-bits points plus rolling-7d percentile lines.
+  getEcashAnonScatter: (federationId: string) =>
+    request<EcashAnonScatter>(`/federations/${federationId}/ecash/anon-scatter`),
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited

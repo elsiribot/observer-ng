@@ -50,6 +50,27 @@ export interface MintDenomination {
   in_circulation: number;
 }
 
+// Scatter-plot data for ecash-spend anonymity over time (Ecash tab): a random
+// sample of per-transaction points plus rolling-7d percentile lines.
+export interface EcashAnonScatter {
+  points: EcashAnonPoint[];
+  percentiles: EcashAnonPercentile[];
+}
+
+export interface EcashAnonPoint {
+  // Unix epoch seconds.
+  t: number;
+  bits: number;
+}
+
+export interface EcashAnonPercentile {
+  // Unix epoch seconds (start of day).
+  t: number;
+  p10: number;
+  p50: number;
+  p90: number;
+}
+
 export interface GuardianHealth {
   avg_uptime: number;
   avg_latency: number;

@@ -425,6 +425,34 @@ pub struct MemberTx {
     pub session_index: i64,
 }
 
+/// Scatter-plot data for ecash-spend anonymity over time: a random sample of
+/// per-transaction points plus rolling-7d percentile lines, both keyed off
+/// the spend-side `transaction_privacy.ecash_anon_bits`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcashAnonScatter {
+    pub points: Vec<EcashAnonPoint>,
+    pub percentiles: Vec<EcashAnonPercentile>,
+}
+
+/// One sampled ecash-spending transaction: its (estimated) session timestamp
+/// and spend-side anonymity-set estimate in bits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EcashAnonPoint {
+    /// Unix epoch seconds.
+    pub t: i64,
+    pub bits: f64,
+}
+
+/// Rolling-7d p10/p50/p90 of `ecash_anon_bits`, one row per day.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EcashAnonPercentile {
+    /// Unix epoch seconds (start of day).
+    pub t: i64,
+    pub p10: f64,
+    pub p50: f64,
+    pub p90: f64,
+}
+
 /// A deduplicated gold-layer user transaction (see `fmo_core::gold`):
 /// grain is `contract_id` for LN kinds, `txid` otherwise. `member_txs` lists
 /// every underlying fedimint transaction and its role.
