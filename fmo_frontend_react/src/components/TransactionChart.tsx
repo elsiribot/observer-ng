@@ -6,6 +6,7 @@ import {
   GridComponent,
   TooltipComponent,
   DataZoomComponent,
+  LegendComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 
@@ -15,51 +16,56 @@ echarts.use([
   GridComponent,
   TooltipComponent,
   DataZoomComponent,
+  LegendComponent,
   CanvasRenderer,
 ]);
 
-interface HistogramEntry {
-  date: string;
-  volume: number;
-  count: number;
-  avgVolume?: number;
-  avgCount?: number;
+export interface ChartSeries {
+  name: string;
+  color: string;
+  data: number[];
 }
 
 interface TransactionChartProps {
-  data: HistogramEntry[];
+  dates: string[];
+  series: ChartSeries[];
   chartMetric: 'volume' | 'count';
-  movingAverageWindow: number;
-  useLogScale: boolean;
   zoomStart: number;
   zoomEnd: number;
   onZoomChange: (start: number, end: number) => void;
 }
 
+function formatValue(value: number, metric: 'volume' | 'count'): string {
+  if (metric === 'volume') {
+    return value.toFixed(8) + ' BTC';
+  }
+  return Math.round(value) + ' transactions';
+}
+
+// Stacked area chart of daily activity, one filled band per transaction-type
+// layer. The layers stack to the day's total; the tooltip lists each layer plus
+// a total row.
 export function TransactionChart({
-  data,
+  dates,
+  series,
   chartMetric,
-  movingAverageWindow,
-  useLogScale,
   zoomStart,
   zoomEnd,
   onZoomChange,
 }: TransactionChartProps) {
-  // Separate the base chart option from zoom state
   const baseChartOption = useMemo(() => {
-    const dates = data.map(d => d.date);
-    const values = data.map(d => chartMetric === 'volume' ? d.volume : d.count);
-    const avgValues = movingAverageWindow > 0 
-      ? data.map(d => chartMetric === 'volume' ? d.avgVolume : d.avgCount)
-      : [];
-
     return {
       grid: {
         left: '3%',
         right: '4%',
         bottom: '15%',
-        top: '10%',
-        containLabel: true
+        top: '15%',
+        containLabel: true,
+      },
+      legend: {
+        top: 0,
+        textStyle: { color: '#9ca3af', fontSize: 11 },
+        icon: 'roundRect',
       },
       xAxis: {
         type: 'category',
@@ -67,14 +73,14 @@ export function TransactionChart({
         axisLabel: {
           rotate: 45,
           fontSize: 10,
-          color: '#9ca3af'
+          color: '#9ca3af',
         },
         axisLine: {
-          lineStyle: { color: '#374151' }
-        }
+          lineStyle: { color: '#374151' },
+        },
       },
       yAxis: {
-        type: useLogScale && chartMetric === 'count' ? 'log' : 'value',
+        type: 'value',
         axisLabel: {
           fontSize: 10,
           color: '#9ca3af',
@@ -83,110 +89,78 @@ export function TransactionChart({
               return value < 0.001 ? value.toExponential(1) : value.toFixed(3);
             }
             return value < 1 ? value.toFixed(1) : Math.round(value).toString();
-          }
+          },
         },
         axisLine: {
-          lineStyle: { color: '#374151' }
+          lineStyle: { color: '#374151' },
         },
         splitLine: {
-          lineStyle: { color: '#374151', type: 'dashed' }
-        }
+          lineStyle: { color: '#374151', type: 'dashed' },
+        },
       },
       tooltip: {
         trigger: 'axis',
         backgroundColor: '#1f2937',
         borderColor: '#374151',
         textStyle: { color: '#fff', fontSize: 12 },
-        formatter: (params: { axisValue: string; marker: string; seriesName: string; value: number }[]) => {
+        formatter: (
+          params: { axisValue: string; marker: string; seriesName: string; value: number }[],
+        ) => {
           const date = params[0].axisValue;
           let result = `${date}<br/>`;
+          let total = 0;
           params.forEach((param) => {
-            const value = param.value;
-            if (param.seriesName.includes('Average')) {
-              result += `${param.marker} ${param.seriesName}: ${
-                chartMetric === 'volume'
-                  ? value?.toFixed(8) + ' BTC'
-                  : value?.toFixed(1) + ' transactions'
-              }<br/>`;
-            } else {
-              result += `${param.marker} ${param.seriesName}: ${
-                chartMetric === 'volume'
-                  ? value.toFixed(8) + ' BTC'
-                  : Math.round(value) + ' transactions'
-              }<br/>`;
-            }
+            const value = param.value ?? 0;
+            total += value;
+            result += `${param.marker} ${param.seriesName}: ${formatValue(value, chartMetric)}<br/>`;
           });
+          result += `<span style="opacity:0.7">Total: ${formatValue(total, chartMetric)}</span>`;
           return result;
-        }
+        },
       },
-      series: [
-        {
-          name: chartMetric === 'volume' ? 'Volume' : 'Transactions',
-          type: 'line',
-          data: values,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { color: '#3b82f6', width: 2 },
-          areaStyle: {
-            color: {
-              type: 'linear',
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: 'rgba(59, 130, 246, 0.8)' },
-                { offset: 1, color: 'rgba(59, 130, 246, 0.1)' }
-              ]
-            }
-          }
-        },
-        ...(movingAverageWindow > 0 && avgValues.length > 0
-          ? [
-              {
-                name: `${movingAverageWindow}-Day Average`,
-                type: 'line',
-                data: avgValues,
-                smooth: true,
-                symbol: 'none',
-                lineStyle: {
-                  color: '#059669',
-                  width: 3,
-                  type: 'dashed'
-                }
-              }
-            ]
-          : [])
-      ]
+      series: series.map((s) => ({
+        name: s.name,
+        type: 'line',
+        stack: 'total',
+        data: s.data,
+        smooth: false,
+        symbol: 'none',
+        lineStyle: { color: s.color, width: 1 },
+        itemStyle: { color: s.color },
+        areaStyle: { color: s.color, opacity: 0.75 },
+        emphasis: { focus: 'series' },
+      })),
     };
-  }, [data, chartMetric, movingAverageWindow, useLogScale]);
+  }, [dates, series, chartMetric]);
 
-  // Create the final chart option with zoom state
-  const chartOption = useMemo(() => ({
-    ...baseChartOption,
-    dataZoom: [
-      {
-        type: 'slider',
-        start: zoomStart,
-        end: zoomEnd,
-        height: 25,
-        bottom: 10,
-        borderColor: '#3b82f6',
-        fillerColor: 'rgba(59, 130, 246, 0.2)',
-        handleStyle: {
-          color: '#3b82f6'
+  const chartOption = useMemo(
+    () => ({
+      ...baseChartOption,
+      dataZoom: [
+        {
+          type: 'slider',
+          start: zoomStart,
+          end: zoomEnd,
+          height: 25,
+          bottom: 10,
+          borderColor: '#3b82f6',
+          fillerColor: 'rgba(59, 130, 246, 0.2)',
+          handleStyle: {
+            color: '#3b82f6',
+          },
+          moveHandleSize: 10,
+          textStyle: { color: '#9ca3af', fontSize: 10 },
         },
-        moveHandleSize: 10,
-        textStyle: { color: '#9ca3af', fontSize: 10 }
-      }
-    ]
-  }), [baseChartOption, zoomStart, zoomEnd]);
+      ],
+    }),
+    [baseChartOption, zoomStart, zoomEnd],
+  );
 
   return (
     <ReactEChartsCore
       echarts={echarts}
       option={chartOption}
-      notMerge={false}
+      notMerge={true}
       lazyUpdate={true}
       style={{ height: '400px', width: '100%' }}
       opts={{ renderer: 'canvas' }}
@@ -202,7 +176,7 @@ export function TransactionChart({
           } else if (params.start !== undefined && params.end !== undefined) {
             onZoomChange(params.start, params.end);
           }
-        }
+        },
       }}
     />
   );

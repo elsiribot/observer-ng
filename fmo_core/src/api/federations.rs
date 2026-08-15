@@ -66,6 +66,10 @@ pub fn get_federations_routes() -> Router<AppState> {
             get(super::transactions::transaction_histogram),
         )
         .route(
+            "/:federation_id/transactions/histogram/stacked",
+            get(super::transactions::transaction_histogram_stacked),
+        )
+        .route(
             "/:federation_id/tx/:txid",
             get(super::transactions::transaction_detail),
         )

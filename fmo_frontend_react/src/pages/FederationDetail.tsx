@@ -14,9 +14,15 @@ import { EcashTab } from '../components/EcashTab';
 import { GuardianTimeline } from '../components/GuardianTimeline';
 import { GuardianLatencyChart } from '../components/GuardianLatencyChart';
 import { uptimeBadgeClasses, formatUptimePct } from '../utils/uptime';
+import {
+  buildStackedSeries,
+  type StackedActivityResponse,
+} from '../utils/activityLayers';
 
 // Lazy load the chart component for code splitting
 const TransactionChart = lazy(() => import('../components/TransactionChart').then(module => ({ default: module.TransactionChart })));
+
+const EMPTY_STACKED: StackedActivityResponse = { user: {}, fedimint: {} };
 
 interface Guardian {
   id: number;
@@ -55,16 +61,6 @@ interface UTXO {
   address: string;
 }
 
-interface HistogramEntry {
-  date: string;
-  volume: number;
-  count: number;
-  avgVolume?: number;
-  avgCount?: number;
-  isoDate?: string;
-  timestamp?: number;
-}
-
 export function FederationDetail() {
   const { id } = useParams<{ id: string }>();
   const [federation, setFederation] = useState<FederationSummary | null>(null);
@@ -78,12 +74,10 @@ export function FederationDetail() {
   const [comment, setComment] = useState('');
   const [ratingError, setRatingError] = useState<string | null>(null);
   const [ratingSuccess, setRatingSuccess] = useState(false);
-  const [histogram, setHistogram] = useState<HistogramEntry[]>([]);
+  const [stackedActivity, setStackedActivity] = useState<StackedActivityResponse>(EMPTY_STACKED);
   const [histogramLoading, setHistogramLoading] = useState(false);
   const [chartMetric, setChartMetric] = useState<'volume' | 'count'>('volume');
-  const [filterOutliers, setFilterOutliers] = useState(true);
-  const [movingAverageWindow, setMovingAverageWindow] = useState<number>(0); // 0 = off, 7 = 7-day, 30 = 30-day
-  const [useLogScale, setUseLogScale] = useState(false);
+  const [grain, setGrain] = useState<'user' | 'fedimint'>('fedimint');
   const [guardianHealth, setGuardianHealth] = useState<Record<string, GuardianHealth>>({});
   const [uptime, setUptime] = useState<FederationUptime | null>(null);
   const [showTimeline, setShowTimeline] = useState(false);
@@ -105,27 +99,41 @@ export function FederationDetail() {
     return names;
   }, [config]);
   
+  // Assemble the stacked series for the selected grain + metric.
+  const stackedSeries = useMemo(
+    () => buildStackedSeries(stackedActivity[grain], chartMetric),
+    [stackedActivity, grain, chartMetric],
+  );
+
+  // Total across all layers and days, for the header figure.
+  const total = useMemo(
+    () =>
+      stackedSeries.series.reduce(
+        (sum, s) => sum + s.data.reduce((a, b) => a + b, 0),
+        0,
+      ),
+    [stackedSeries],
+  );
+
   // Calculate initial zoom to show last 3 months of data by default
   const initialZoom = useMemo(() => {
-    if (histogram.length === 0) return { start: 0, end: 100 };
-    
+    const { timestamps } = stackedSeries;
+    if (timestamps.length === 0) return { start: 0, end: 100 };
+
     // Use timestamps to compute last 90 days (3 months ~ 90 days)
     const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
-    const lastTs = histogram[histogram.length - 1].timestamp || 0;
+    const lastTs = timestamps[timestamps.length - 1];
     const cutoffTs = lastTs - THREE_MONTHS_MS;
-    
-    // Find first index with timestamp >= cutoff
-    let startIndex = histogram.findIndex((h) => (h.timestamp ?? 0) >= cutoffTs);
+
+    let startIndex = timestamps.findIndex((t) => t >= cutoffTs);
     if (startIndex === -1) {
-      // If no entry is within the last 90 days, show all
       startIndex = 0;
     }
-    
-    // Calculate percentage
-    const startPercent = (startIndex / histogram.length) * 100;
+
+    const startPercent = (startIndex / timestamps.length) * 100;
     return { start: startPercent, end: 100 };
-  }, [histogram]);
-  
+  }, [stackedSeries]);
+
   const [zoomState, setZoomState] = useState<{ start: number; end: number }>(initialZoom);
 
   useEffect(() => {
@@ -159,67 +167,14 @@ export function FederationDetail() {
       });
   }, [id]);
 
-  // Update zoom state when histogram data loads
+  // Reset the zoom window only when the day set changes (data load or grain
+  // switch), not on a metric toggle (which keeps the same days).
   useEffect(() => {
-    if (histogram.length > 0) {
+    if (stackedSeries.timestamps.length > 0) {
       setZoomState(initialZoom);
     }
-  }, [histogram.length, initialZoom]);
-
-  // Remove outliers (values > 10 * 95th percentile)
-  const removeOutliers = (data: HistogramEntry[]): HistogramEntry[] => {
-    if (data.length === 0) return data;
-    const values = data.map(d => d.volume).sort((a, b) => a - b);
-    const percentile95Index = Math.floor(values.length * 0.95);
-    const percentile95 = values[percentile95Index];
-    const threshold = percentile95 * 10;
-    return data.filter(d => d.volume < threshold);
-  };
-
-  // Calculate moving average with configurable window size using O(n) sliding window
-  const calculateMovingAverage = (data: HistogramEntry[], windowSize = 7) => {
-    if (data.length === 0) return data;
-    
-    let volumeSum = 0;
-    let countSum = 0;
-    const result: HistogramEntry[] = [];
-    
-    for (let i = 0; i < data.length; i++) {
-      // Add current value to the window
-      volumeSum += data[i].volume;
-      countSum += data[i].count;
-      
-      // Remove the value that falls out of the window (if window is full)
-      if (i >= windowSize) {
-        volumeSum -= data[i - windowSize].volume;
-        countSum -= data[i - windowSize].count;
-      }
-      
-      // Calculate average based on actual window size
-      const actualWindowSize = Math.min(i + 1, windowSize);
-      const avgVolume = volumeSum / actualWindowSize;
-      const avgCount = countSum / actualWindowSize;
-      
-      result.push({
-        ...data[i],
-        avgVolume,
-        avgCount,
-      });
-    }
-    
-    return result;
-  };
-
-
-  // Memoize the processed chart data to avoid recalculating on every render
-  const processedChartData = useMemo(() => {
-    let data = chartMetric === 'volume' && filterOutliers ? removeOutliers(histogram) : histogram;
-    if (movingAverageWindow > 0) {
-      data = calculateMovingAverage(data, movingAverageWindow);
-    }
-    // Don't apply log scale manually - let ECharts handle it with yAxis type: 'log'
-    return data;
-  }, [histogram, chartMetric, filterOutliers, movingAverageWindow]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grain, stackedSeries.timestamps.length]);
 
   const fetchGuardianHealth = async (federationId: string) => {
     try {
@@ -236,21 +191,12 @@ export function FederationDetail() {
   const fetchHistogram = async (federationId: string) => {
     setHistogramLoading(true);
     try {
-      const response = await authedFetch(`/federations/${federationId}/transactions/histogram`);
+      const response = await authedFetch(`/federations/${federationId}/transactions/histogram/stacked`);
       if (response.ok) {
-        const data = await response.json() as Record<string, { num_transactions: number; amount_transferred: number }>;
-        // Data comes as: { "2024-05-31": { "num_transactions": 1, "amount_transferred": 2000000000 }, ... }
-        const chartData = Object.entries(data).map(([dateStr, stats]) => {
-          const date = new Date(dateStr);
-          return {
-            date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            isoDate: dateStr,
-            timestamp: date.getTime(),
-            volume: stats.amount_transferred / 100000000000, // millisats to BTC
-            count: stats.num_transactions,
-          };
-        });
-        setHistogram(chartData);
+        // { "user": { "2024-05-31": { "ln_send": {num_transactions, amount_transferred}, ... } },
+        //   "fedimint": { ... } }
+        const data = await response.json() as StackedActivityResponse;
+        setStackedActivity({ user: data.user ?? {}, fedimint: data.fedimint ?? {} });
       }
     } catch (error) {
       console.error('Failed to fetch histogram:', error);
@@ -683,67 +629,35 @@ export function FederationDetail() {
                   <div className="flex-1 min-w-0">
                     <h3 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white break-words">
                       {chartMetric === 'volume'
-                        ? histogram.reduce((sum, entry) => sum + entry.volume, 0).toFixed(6) + ' BTC'
-                        : histogram.reduce((sum, entry) => sum + entry.count, 0).toString()}
+                        ? total.toFixed(6) + ' BTC'
+                        : Math.round(total).toString()}
                     </h3>
                     <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
-                      {chartMetric === 'volume' ? 'Total Volume' : 'Total Transactions'}
+                      {grain === 'user' ? 'User' : 'Fedimint'} {chartMetric === 'volume' ? 'Volume' : 'Transactions'}
                     </p>
                   </div>
                   <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 relative z-10">
                     <div className="relative">
                       <select
-                        className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white text-xs sm:text-sm min-w-[140px] appearance-none cursor-pointer"
-                        value={movingAverageWindow}
-                        onChange={(e) => setMovingAverageWindow(Number(e.target.value))}
-                        aria-label="Moving average"
+                        className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white text-xs sm:text-sm min-w-[160px] appearance-none cursor-pointer"
+                        value={grain}
+                        onChange={(e) => setGrain(e.target.value as 'user' | 'fedimint')}
+                        aria-label="Transaction grain"
                       >
-                        <option value="0">No Average</option>
-                        <option value="7">7-Day Avg</option>
-                        <option value="30">30-Day Avg</option>
+                        <option value="fedimint">Fedimint transactions</option>
+                        <option value="user">User transactions</option>
                       </select>
                     </div>
-                    {chartMetric === 'count' && (
-                      <label
-                        className="flex items-center text-xs sm:text-sm text-gray-600 dark:text-gray-400 cursor-pointer whitespace-nowrap"
-                        title="Use logarithmic scale (base 10) for Y-axis. Zeros are replaced with a small value."
-                      >
-                        <input
-                          type="checkbox"
-                          className="mr-2 w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 shrink-0"
-                          checked={useLogScale}
-                          onChange={(e) => setUseLogScale(e.target.checked)}
-                        />
-                        <span className="hidden sm:inline">Log Scale</span>
-                        <span className="sm:hidden">Log</span>
-                      </label>
-                    )}
-                    {chartMetric === 'volume' && (
-                      <label
-                        className="flex items-center text-xs sm:text-sm text-gray-600 dark:text-gray-400 cursor-pointer whitespace-nowrap"
-                        title="Filter out values that are more than 10 times the 95th percentile"
-                      >
-                        <input
-                          type="checkbox"
-                          className="mr-2 w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 shrink-0"
-                          checked={filterOutliers}
-                          onChange={(e) => setFilterOutliers(e.target.checked)}
-                        />
-                        <span className="hidden sm:inline">Filter Extreme Outliers</span>
-                        <span className="sm:hidden">Filter Outliers</span>
-                      </label>
-                    )}
                     <div className="relative">
                       <select
-                        className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white text-xs sm:text-sm min-w-[140px] appearance-none cursor-pointer debug-select"
+                        className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white text-xs sm:text-sm min-w-[140px] appearance-none cursor-pointer"
                         value={chartMetric}
                         onChange={(e) => setChartMetric(e.target.value as 'volume' | 'count')}
-                        aria-label="Chart metric (debug)"
+                        aria-label="Chart metric"
                       >
                         <option value="volume">Volume</option>
                         <option value="count">Transactions</option>
                       </select>
-                     
                     </div>
                   </div>
                 </div>
@@ -752,10 +666,10 @@ export function FederationDetail() {
                   <div className="text-center text-xs sm:text-sm text-gray-500 dark:text-gray-400 py-12">
                     Loading chart data...
                   </div>
-                ) : histogram.length > 0 ? (
+                ) : stackedSeries.series.length > 0 ? (
                   <div className="mt-4 -mx-4 sm:mx-0">
                     <h4 className="text-center text-sm sm:text-base font-normal text-gray-500 dark:text-gray-400 mb-4 px-4 sm:px-0">
-                      Daily {chartMetric === 'volume' ? 'Volume' : 'Transactions'}{useLogScale && chartMetric === 'count' ? ' (Log Scale)' : ''}
+                      Daily {chartMetric === 'volume' ? 'Volume' : 'Transactions'} by type
                     </h4>
                     <div className="w-full px-4 sm:px-0">
                       <Suspense fallback={
@@ -764,10 +678,13 @@ export function FederationDetail() {
                         </div>
                       }>
                         <TransactionChart
-                          data={processedChartData}
+                          dates={stackedSeries.dates}
+                          series={stackedSeries.series.map((s) => ({
+                            name: s.label,
+                            color: s.color,
+                            data: s.data,
+                          }))}
                           chartMetric={chartMetric}
-                          movingAverageWindow={movingAverageWindow}
-                          useLogScale={useLogScale}
                           zoomStart={zoomState.start}
                           zoomEnd={zoomState.end}
                           onZoomChange={(start, end) => setZoomState({ start, end })}

@@ -173,7 +173,11 @@ impl FederationObserver {
         // `federation_tx_daily` depends only on `session_times` (refreshed
         // above) + structural tables, so it's safe to refresh alongside the
         // gold rollup here.
-        let mut matviews = vec!["user_tx_daily".to_owned(), "federation_tx_daily".to_owned()];
+        let mut matviews = vec![
+            "user_tx_daily".to_owned(),
+            "federation_tx_daily".to_owned(),
+            "federation_tx_kind_daily".to_owned(),
+        ];
         for (_, module) in self.registry().iter() {
             matviews.extend(module.matviews().iter().map(|view| (*view).to_owned()));
         }

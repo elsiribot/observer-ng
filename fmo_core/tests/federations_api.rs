@@ -140,6 +140,124 @@ async fn histogram_is_isolated_per_federation() {
     assert_eq!(histogram_b[0].amount, 500);
 }
 
+/// The stacked activity histogram's `fedimint` grain classifies each raw
+/// fedimint tx into exactly one `kind` (via the `federation_tx_kind_daily`
+/// matview), with `lightning` winning over the peg cases when a tx touches
+/// `ln`/`lnv2`. Verify the classification and the per-kind count/volume.
+#[tokio::test]
+async fn stacked_histogram_classifies_fedimint_txs_by_kind() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = test_pool() else {
+        eprintln!("skipping: FMO_TEST_DATABASE unset");
+        return;
+    };
+    reset_db(&pool).await;
+
+    let (config, fed) = dummy_config();
+    insert_federation(&pool, &config, fed).await;
+    let fed_bytes = fed.consensus_encode_to_vec();
+
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        "INSERT INTO sessions (federation_id, session_index, data) VALUES ($1, 0, ''::bytea)",
+        &[&fed_bytes],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_time_votes (federation_id, session_index, source_kind, peer_id, timestamp)
+         VALUES ($1, 0, 'wallet', 0, '2024-01-15 12:00:00')",
+        &[&fed_bytes],
+    )
+    .await
+    .unwrap();
+    fmo_core::db::session_times::recompute_full(&conn)
+        .await
+        .unwrap();
+
+    // Four txs, one per expected kind bucket:
+    //   tx1 ecash_transfer: mint in + mint out
+    //   tx2 peg_in:         wallet in
+    //   tx3 lightning:      mint in + ln out (touching ln wins over the mint/peg
+    //                       classification)
+    //   tx4 peg_out:        wallet out
+    for (txid, item) in [
+        (&b"tx1"[..], 0i32),
+        (&b"tx2"[..], 1),
+        (&b"tx3"[..], 2),
+        (&b"tx4"[..], 3),
+    ] {
+        conn.execute(
+            "INSERT INTO transactions (federation_id, txid, session_index, item_index, data)
+             VALUES ($1, $2, 0, $3, ''::bytea)",
+            &[&fed_bytes, &txid.to_vec(), &item],
+        )
+        .await
+        .unwrap();
+    }
+    // inputs
+    conn.execute(
+        "INSERT INTO transaction_inputs (federation_id, txid, in_index, kind, amount_msat) VALUES
+           ($1, $2, 0, 'mint',   1000),
+           ($1, $3, 0, 'wallet', 5000),
+           ($1, $4, 0, 'mint',   3000)",
+        &[
+            &fed_bytes,
+            &b"tx1".to_vec(),
+            &b"tx2".to_vec(),
+            &b"tx3".to_vec(),
+        ],
+    )
+    .await
+    .unwrap();
+    // outputs
+    conn.execute(
+        "INSERT INTO transaction_outputs (federation_id, txid, out_index, kind, amount_msat) VALUES
+           ($1, $2, 0, 'mint',   1000),
+           ($1, $3, 0, 'ln',     2900),
+           ($1, $4, 0, 'wallet', 4000)",
+        &[
+            &fed_bytes,
+            &b"tx1".to_vec(),
+            &b"tx3".to_vec(),
+            &b"tx4".to_vec(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    conn.batch_execute("REFRESH MATERIALIZED VIEW federation_tx_kind_daily")
+        .await
+        .unwrap();
+    drop(conn);
+
+    let registry = ModuleRegistry::new(vec![]);
+    let observer = FederationObserver::new_without_tasks(
+        &std::env::var("FMO_TEST_DATABASE").unwrap(),
+        "admin",
+        "http://unused.invalid",
+        registry,
+    )
+    .await
+    .unwrap();
+
+    let (_user, fedimint) = observer.transaction_histogram_stacked(fed).await.unwrap();
+    // (kind -> (count, volume)) collapsed across the single day.
+    let by_kind: std::collections::BTreeMap<String, (i64, i64)> = fedimint
+        .into_iter()
+        .map(|e| (e.kind, (e.count, e.amount)))
+        .collect();
+
+    assert_eq!(by_kind.get("ecash_transfer"), Some(&(1, 1000)));
+    assert_eq!(by_kind.get("peg_in"), Some(&(1, 5000)));
+    // lightning volume = summed input amount of tx3
+    assert_eq!(by_kind.get("lightning"), Some(&(1, 3000)));
+    // peg_out has no inputs, so its summed input volume is 0
+    assert_eq!(by_kind.get("peg_out"), Some(&(1, 0)));
+    // No spurious extra kinds.
+    assert_eq!(by_kind.len(), 4);
+}
+
 /// `federation_summary` (used by the new single-federation summary endpoint)
 /// must produce the same result as the corresponding entry from
 /// `list_federation_summaries` (used by the fleet overview) -- they share

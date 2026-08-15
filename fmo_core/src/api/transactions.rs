@@ -80,6 +80,55 @@ pub(super) async fn transaction_histogram(
     ))
 }
 
+/// Stacked activity for both grains, keyed by grain then day then transaction
+/// `kind`. Serialized to `{ "user": {...}, "fedimint": {...} }`; the `kind`
+/// strings are the raw gold/matview kinds and the frontend collapses them into
+/// display layers (see `activityLayers.ts`).
+#[derive(serde::Serialize)]
+struct StackedActivity {
+    user: BTreeMap<NaiveDate, BTreeMap<String, FederationActivity>>,
+    fedimint: BTreeMap<NaiveDate, BTreeMap<String, FederationActivity>>,
+}
+
+/// Folds `(day, kind, count, amount)` rows into `day -> kind -> activity`.
+fn fold_kind_histogram(
+    rows: Vec<KindHistogramEntry>,
+) -> BTreeMap<NaiveDate, BTreeMap<String, FederationActivity>> {
+    let mut out: BTreeMap<NaiveDate, BTreeMap<String, FederationActivity>> = BTreeMap::new();
+    for row in rows {
+        out.entry(row.date).or_default().insert(
+            row.kind,
+            FederationActivity {
+                num_transactions: row.count as u64,
+                amount_transferred: Amount::from_msats(row.amount as u64),
+            },
+        );
+    }
+    out
+}
+
+/// Stacked activity histogram: per-day, per-transaction-type counts and volume
+/// for BOTH grains (deduplicated user transactions and raw fedimint
+/// transactions) in a single response, so the frontend mode toggle needs no
+/// refetch.
+pub(super) async fn transaction_histogram_stacked(
+    Path(federation_id): Path<FederationId>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl axum::response::IntoResponse> {
+    let (user, fedimint) = state
+        .observer
+        .transaction_histogram_stacked(federation_id)
+        .await?;
+
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "public, max-age=30")],
+        Json(StackedActivity {
+            user: fold_kind_histogram(user),
+            fedimint: fold_kind_histogram(fedimint),
+        }),
+    ))
+}
+
 impl FederationObserver {
     pub async fn federation_transaction_list(
         &self,
@@ -249,11 +298,68 @@ impl FederationObserver {
 
         Ok(histogram)
     }
+
+    /// Per-day, per-`kind` activity for both grains. Returns
+    /// `(user_transactions, fedimint_transactions)`.
+    ///
+    /// - User grain: the gold `user_tx_daily` matview, summed over `direction`
+    ///   (a display layer merges both directions of a kind anyway).
+    /// - Fedimint grain: the `federation_tx_kind_daily` matview (v11), which
+    ///   classifies each raw fedimint tx into one `kind`.
+    ///
+    /// Both matviews are refreshed together on the normal cycle, so the two
+    /// grains are consistent as of the same snapshot.
+    pub async fn transaction_histogram_stacked(
+        &self,
+        federation_id: FederationId,
+    ) -> anyhow::Result<(Vec<KindHistogramEntry>, Vec<KindHistogramEntry>)> {
+        // language=postgresql
+        const USER_QUERY: &str = "
+            SELECT day                     AS date,
+                   kind                    AS kind,
+                   SUM(tx_count)::bigint   AS count,
+                   SUM(volume_msat)::bigint AS amount
+            FROM user_tx_daily
+            WHERE federation_id = $1
+            GROUP BY day, kind
+            ORDER BY day, kind;
+        ";
+        // language=postgresql
+        const FEDIMINT_QUERY: &str = "
+            SELECT day          AS date,
+                   kind         AS kind,
+                   tx_count     AS count,
+                   volume_msat  AS amount
+            FROM federation_tx_kind_daily
+            WHERE federation_id = $1
+            ORDER BY day, kind;
+        ";
+
+        let _federation = self
+            .get_federation(federation_id)
+            .await?
+            .context("Federation doesn't exist")?;
+
+        let fed = federation_id.consensus_encode_to_vec();
+        let conn = self.connection().await?;
+        let user = query::<KindHistogramEntry>(&conn, USER_QUERY, &[&fed]).await?;
+        let fedimint = query::<KindHistogramEntry>(&conn, FEDIMINT_QUERY, &[&fed]).await?;
+
+        Ok((user, fedimint))
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct HistogramEntry {
     pub date: NaiveDate,
+    pub count: i64,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct KindHistogramEntry {
+    pub date: NaiveDate,
+    pub kind: String,
     pub count: i64,
     pub amount: i64,
 }
