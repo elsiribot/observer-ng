@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
-import type { TxDetail, TxItemPart, UserTransaction } from '../types/api';
+import type { EcashDenomAnon, TxDetail, TxItemPart, UserTransaction } from '../types/api';
 import { Alert } from '../components/Alert';
 import { Badge } from '../components/Badge';
 import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
 import { asSats, formatNumber } from '../utils/format';
-import { formatAnonSet } from '../utils/anonSet';
+import { formatAnonSet, formatSi } from '../utils/anonSet';
 
 // Transaction-detail page: the structured inputs/outputs of one fedimint
 // transaction, drilled into from a session's item list or the consensus
@@ -105,6 +105,8 @@ export function TransactionDetail() {
         </div>
       )}
 
+      <AnonBreakdownBox breakdown={detail.ecash_anon_breakdown} />
+
       {formatAnonSet(detail.ecash_issuance_bits) !== null && (
         <div className="mb-6 sm:mb-8">
           <div className="uppercase text-xs text-gray-400 dark:text-gray-500 mb-1">
@@ -147,6 +149,71 @@ export function TransactionDetail() {
         <TxPartsPanel title="Inputs" parts={detail.inputs} />
         <TxPartsPanel title="Outputs" parts={detail.outputs} />
       </div>
+    </div>
+  );
+}
+
+// Info box explaining what set the anonymity number: the spent ecash
+// denominations, weakest (smallest crowd) first. The rows tied for the
+// smallest pool are the weakest link — they equal the tx's ecash_anon_bits.
+function AnonBreakdownBox({ breakdown }: { breakdown: EcashDenomAnon[] }) {
+  if (!breakdown || breakdown.length === 0) {
+    return null;
+  }
+  const pools = breakdown
+    .map((d) => d.pool)
+    .filter((p): p is number => p !== null && p !== undefined);
+  const minPool = pools.length > 0 ? Math.min(...pools) : null;
+
+  return (
+    <div className="mb-6 sm:mb-8 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/20 p-4">
+      <div className="uppercase text-xs text-amber-700 dark:text-amber-500 mb-1">
+        What limited the anonymity set
+      </div>
+      <p className="text-xs text-gray-600 dark:text-gray-400 mb-3">
+        Each ecash denomination this transaction spent hides among the notes of
+        that denomination already in circulation. The set is only as strong as
+        the <span className="font-semibold">scarcest</span> one spent.
+      </p>
+      <ul className="divide-y divide-amber-200/70 dark:divide-amber-900/40">
+        {breakdown.map((d) => {
+          const isWeakest = minPool !== null && d.pool === minPool;
+          return (
+            <li
+              key={`${d.kind}-${d.denomination_msat}`}
+              className="py-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm"
+            >
+              <span
+                className="font-mono text-gray-900 dark:text-white"
+                title={`${d.denomination_msat.toLocaleString()} msat · ${asSats(d.denomination_msat)}`}
+              >
+                {formatSi(d.denomination_msat)} msat
+              </span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                ×{formatNumber(d.notes_spent)} spent
+              </span>
+              <span className="ml-auto text-sm text-gray-700 dark:text-gray-300 tabular-nums">
+                {d.pool !== null ? (
+                  <>
+                    crowd of {formatNumber(d.pool)}
+                    {d.bits !== null && (
+                      <span className="text-xs text-gray-400 dark:text-gray-500">
+                        {' '}
+                        (≈{d.bits.toFixed(1)} bits)
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-gray-400 dark:text-gray-500">no pool data</span>
+                )}
+              </span>
+              {isWeakest && (
+                <Badge level="warning">weakest link</Badge>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

@@ -391,6 +391,26 @@ pub struct TxItemPart {
     pub details: Option<serde_json::Value>,
 }
 
+/// One spent ecash denomination and the anonymity crowd it had at spend time.
+/// The transaction's `ecash_anon_bits` is the minimum `bits` across these — so
+/// the entries with the smallest pools are the ones that dragged the anonymity
+/// set down. Ordered weakest (smallest pool) first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcashDenomAnon {
+    /// Mint module kind that issued the denomination ("mint" or "mintv2").
+    pub kind: String,
+    /// The note denomination in millisatoshi (a power of two).
+    pub denomination_msat: i64,
+    /// How many notes of this denomination the transaction spent.
+    pub notes_spent: i64,
+    /// In-circulation pool of this denomination strictly before the spend —
+    /// the crowd size. `None` when no pool snapshot exists before the session.
+    pub pool: Option<i64>,
+    /// `log2(pool)`; `None` when `pool` is. The row whose `bits` equals the
+    /// transaction's `ecash_anon_bits` is the weakest link.
+    pub bits: Option<f64>,
+}
+
 /// Structured detail of one fedimint transaction: its inputs/outputs (kind +
 /// amount, read from the structural silver tables) plus, if this tx is part
 /// of a deduplicated gold-layer user transaction, that user transaction's key
@@ -413,6 +433,11 @@ pub struct TxDetail {
     /// Forward-looking and weaker than `ecash_anon_bits`. `None` for
     /// non-issuing transactions or when no pool data exists.
     pub ecash_issuance_bits: Option<f64>,
+    /// Per-denomination breakdown behind `ecash_anon_bits`: each spent ecash
+    /// denomination with its crowd size, weakest (smallest pool) first. Empty
+    /// for transactions that spend no ecash. Lets the UI show which
+    /// denominations dragged the anonymity set down.
+    pub ecash_anon_breakdown: Vec<EcashDenomAnon>,
 }
 
 /// One fedimint transaction that is a member (leg) of a gold-layer user

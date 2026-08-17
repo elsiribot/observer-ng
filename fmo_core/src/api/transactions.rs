@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use fedimint_core::config::FederationId;
 use fedimint_core::encoding::Encodable;
 use fedimint_core::{Amount, TransactionId};
-use fmo_api_types::{FederationActivity, TxDetail, TxItemPart};
+use fmo_api_types::{EcashDenomAnon, FederationActivity, TxDetail, TxItemPart};
 use postgres_from_row::FromRow;
 
 use crate::api::AppState;
@@ -246,6 +246,47 @@ impl FederationObserver {
         let ecash_anon_bits = ecash_privacy.as_ref().and_then(|row| row.ecash_anon_bits);
         let ecash_issuance_bits = ecash_privacy.and_then(|row| row.ecash_issuance_bits);
 
+        // Per-denomination breakdown behind `ecash_anon_bits`: for each ecash
+        // denomination this tx spent, its in-circulation pool strictly before
+        // the tx's session (the crowd), weakest first. Mirrors the `MIN(...)`
+        // in gold::ecash_bits_sql, but keeps every denomination rather than
+        // only the minimum, so the UI can show what dragged the set down.
+        #[derive(FromRow)]
+        struct DenomAnonRow {
+            kind: String,
+            denomination_msat: i64,
+            notes_spent: i64,
+            pool: Option<i64>,
+        }
+        let breakdown = query::<DenomAnonRow>(
+            &self.connection().await?,
+            "SELECT io.kind,
+                    io.amount_msat AS denomination_msat,
+                    count(*)::bigint AS notes_spent,
+                    (SELECT nc.in_circulation FROM note_circulation nc
+                      WHERE nc.federation_id = $1 AND nc.kind = io.kind
+                        AND nc.denomination_msat = io.amount_msat
+                        AND nc.session_index < $3
+                      ORDER BY nc.session_index DESC LIMIT 1) AS pool
+             FROM transaction_inputs io
+             WHERE io.federation_id = $1 AND io.txid = $2
+               AND io.kind IN ('mint', 'mintv2') AND io.amount_msat IS NOT NULL
+             GROUP BY io.kind, io.amount_msat
+             ORDER BY pool ASC NULLS LAST, denomination_msat DESC",
+            &[&fed, &txid, &(tx.session_index as i32)],
+        )
+        .await?;
+        let ecash_anon_breakdown = breakdown
+            .into_iter()
+            .map(|row| EcashDenomAnon {
+                kind: row.kind,
+                denomination_msat: row.denomination_msat,
+                notes_spent: row.notes_spent,
+                bits: row.pool.filter(|&p| p > 0).map(|p| (p as f64).log2()),
+                pool: row.pool,
+            })
+            .collect();
+
         let to_part = |row: PartRow| TxItemPart {
             index: row.index,
             kind: row.kind,
@@ -262,6 +303,7 @@ impl FederationObserver {
             user_tx_key,
             ecash_anon_bits,
             ecash_issuance_bits,
+            ecash_anon_breakdown,
         })
     }
 

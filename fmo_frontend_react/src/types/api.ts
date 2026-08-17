@@ -302,6 +302,19 @@ export interface TxItemPart {
 /// Structured detail of one fedimint transaction: its inputs/outputs plus,
 /// if this tx is part of a deduplicated gold-layer user transaction, that
 /// user transaction's key.
+/** One spent ecash denomination and the anonymity crowd it had at spend time.
+ * The tx's `ecash_anon_bits` is the min `bits` across these; smallest-pool
+ * rows are what dragged the anonymity set down. Ordered weakest first. */
+export interface EcashDenomAnon {
+  kind: string;
+  denomination_msat: number;
+  notes_spent: number;
+  /** In-circulation pool of this denomination just before the spend. */
+  pool: number | null;
+  /** log2(pool); null when pool is. */
+  bits: number | null;
+}
+
 export interface TxDetail {
   txid: string;
   session_index: number;
@@ -316,6 +329,9 @@ export interface TxDetail {
    * in-circulation pool of freshly-minted notes' denomination). Forward-
    * looking and weaker than `ecash_anon_bits`; null when not applicable. */
   ecash_issuance_bits: number | null;
+  /** Per-denomination breakdown behind `ecash_anon_bits`, weakest first.
+   * Empty for transactions that spend no ecash. */
+  ecash_anon_breakdown: EcashDenomAnon[];
 }
 
 /// One fedimint transaction that is a member (leg) of a gold-layer user
