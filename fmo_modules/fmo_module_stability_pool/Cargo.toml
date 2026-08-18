@@ -6,14 +6,18 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.81"
 async-trait = "0.1"
+axum = { version = "0.7.5", features = ["json"] }
 bitcoin = { version = "0.32.5", features = ["serde"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 fedimint-core = { workspace = true }
+fmo_api_types = { path = "../../fmo_api_types" }
 fmo_core = { path = "../../fmo_core" }
+postgres-from-row = "0.5.2"
 secp256k1 = { version = "0.29.1", features = ["serde", "global-context"] }
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1.0.115"
 thiserror = "1.0.58"
+tokio-postgres = "0.7.11"
 tracing = "0.1.40"
 
 [dev-dependencies]

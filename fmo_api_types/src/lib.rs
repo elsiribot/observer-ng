@@ -478,6 +478,152 @@ pub struct EcashAnonPercentile {
     pub p90: f64,
 }
 
+// ---------------------------------------------------------------------------
+// Stability pool (multi_sig_stability_pool) gold layer — see
+// `fmo_module_stability_pool/schema/v1.sql`. All fiat values are in the
+// federation's stable-currency base unit (cents for USD); timestamps are unix
+// seconds.
+// ---------------------------------------------------------------------------
+
+/// Federation-wide stability-pool summary for the module tab header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpSummary {
+    pub account_count: i64,
+    pub seeker_count: i64,
+    pub provider_count: i64,
+    pub btc_depositor_count: i64,
+    pub multisig_count: i64,
+    /// Cumulative deposits − withdrawals actually seen on the ledger (the
+    /// latest `pool_flows` point). Approximate net-contributed pool, NOT
+    /// true TVL.
+    pub net_msat: i64,
+    pub net_fiat: i64,
+    pub latest_cycle_index: Option<i64>,
+    pub latest_price_fiat: Option<i64>,
+    pub cycle_count: i64,
+}
+
+/// Per-account rollup (net flows), plus observed multi-sig structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpAccount {
+    pub account_id: String,
+    /// Derived from the account-id bech32 HRP: "seeker" | "provider" |
+    /// "btc_depositor".
+    pub acc_type: String,
+    pub is_multisig: bool,
+    /// NULL when the account has never revealed its full `Account`
+    /// (deposit-only accounts): its key structure is simply not yet
+    /// observable.
+    pub threshold: Option<i64>,
+    pub n_keys: Option<i64>,
+    pub msat_deposited: i64,
+    pub msat_withdrawn: i64,
+    pub msat_net: i64,
+    pub fiat_deposited: i64,
+    pub fiat_withdrawn: i64,
+    /// For a seeker ≈ current stabilized fiat balance; for a provider this is
+    /// capital contributed, not a live balance.
+    pub fiat_net: i64,
+    pub transfers_in_fiat: i64,
+    pub transfers_out_fiat: i64,
+    pub tx_count: i64,
+    pub first_seen: Option<i64>,
+    pub last_seen: Option<i64>,
+    pub first_session: Option<i64>,
+    pub last_session: Option<i64>,
+}
+
+/// A page of `SpAccount`s (offset-paginated; SP account counts are modest).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpAccountsPage {
+    pub items: Vec<SpAccount>,
+    pub total: i64,
+}
+
+/// One folded logical stability-pool operation for an account (from
+/// `account_tx`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpAccountTx {
+    pub tx_key: String,
+    /// deposit_seek | deposit_provide | deposit_btc | withdraw | transfer_in |
+    /// transfer_out
+    pub kind: String,
+    /// "in" | "out" | "internal"
+    pub direction: String,
+    pub amount_msat: Option<i64>,
+    pub fiat_amount: Option<i64>,
+    /// True when `fiat_amount` is the requested unlock target rather than a
+    /// value derived from an on-ledger msat amount.
+    pub fiat_is_target: bool,
+    pub cycle_index: Option<i64>,
+    pub cycle_price_fiat: Option<i64>,
+    pub session_index: i64,
+    pub timestamp: Option<i64>,
+    /// Representative fedimint tx (hex): the withdrawal for a folded withdraw,
+    /// the deposit/transfer output otherwise.
+    pub primary_txid: String,
+    /// The paired unlock tx (hex) for a folded withdraw, else null.
+    pub secondary_txid: Option<String>,
+    /// For transfers: the other account.
+    pub counterparty: Option<String>,
+}
+
+/// A keyset page of `SpAccountTx` ordered by (session_index, tx_key) DESC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpAccountTxPage {
+    pub items: Vec<SpAccountTx>,
+    pub next: Option<(i64, String)>,
+}
+
+/// An aggregated transfer edge relative to a queried account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpTransferEdge {
+    pub counterparty: String,
+    /// "in" (counterparty → account) | "out" (account → counterparty)
+    pub direction: String,
+    pub total_fiat: i64,
+    pub n: i64,
+    pub first_session: Option<i64>,
+    pub last_session: Option<i64>,
+}
+
+/// A point on the cycle price/time series (from `cycles`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpCycle {
+    pub cycle_index: i64,
+    pub start_price_fiat: i64,
+    pub start_time: Option<i64>,
+    pub num_votes: i64,
+}
+
+/// One point of the federation's per-cycle time series (cycle price joined with
+/// the cumulative net-flow curve), for the overview charts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpSeriesPoint {
+    pub cycle_index: i64,
+    pub start_time: Option<i64>,
+    pub price_fiat: i64,
+    /// Cumulative deposits − withdrawals up to and including this cycle (null
+    /// for cycles with no ledger activity).
+    pub cumulative_msat: Option<i64>,
+    pub cumulative_fiat: Option<i64>,
+}
+
+/// A stability-pool input/output of a fedimint transaction, resolved to the
+/// account it touches — used to link a tx-detail row to an account page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpTxAccount {
+    /// "input" | "output"
+    pub side: String,
+    pub index: i32,
+    pub account_id: String,
+    /// The concrete operation:
+    /// deposit_to_seek/…/withdrawal/unlock_for_withdrawal/transfer.
+    pub kind: String,
+    /// Transfer recipient, for a transfer output.
+    pub counterparty: Option<String>,
+}
+
 /// A deduplicated gold-layer user transaction (see `fmo_core::gold`):
 /// grain is `contract_id` for LN kinds, `txid` otherwise. `member_txs` lists
 /// every underlying fedimint transaction and its role.

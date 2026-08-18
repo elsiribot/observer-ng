@@ -8,6 +8,7 @@ use fedimint_core::Amount;
 use fmo_core::module::{CiMeta, ItemMeta, Migration, ObserverModule, ProcessCtx, ProcessedItem};
 use tracing::warn;
 
+pub mod api;
 pub mod spec;
 
 use spec::{
@@ -68,6 +69,10 @@ impl ObserverModule for StabilityPoolObserver {
             "fmo_multi_sig_stability_pool.sp_daily",
             "fmo_multi_sig_stability_pool.pool_flows",
         ]
+    }
+
+    fn api_router(&self) -> Option<axum::Router<fmo_core::api::ModuleApiState>> {
+        Some(api::router())
     }
 
     async fn process_input(

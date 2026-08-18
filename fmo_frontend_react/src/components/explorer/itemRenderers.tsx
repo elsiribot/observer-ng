@@ -8,7 +8,7 @@ import type { MouseEvent, ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Badge, type BadgeLevel } from '../Badge';
 import { api } from '../../services/api';
-import { asSats, formatNumber } from '../../utils/format';
+import { asSats, formatFiat, formatNumber, formatTimestamp } from '../../utils/format';
 import { formatAnonSetCount } from '../../utils/anonSet';
 import type { SessionItem, TxDetail, TxItemPart } from '../../types/api';
 
@@ -426,6 +426,30 @@ export function ContractLink({ id }: { id: string }) {
   );
 }
 
+// Renders a stability-pool account id, cross-linked to its account-detail page
+// when a federation id is available from the route; otherwise plain mono text.
+// Modeled on `ContractLink`.
+export function AccountLink({ id, label }: { id: string; label?: string }) {
+  const { id: federationId } = useParams<{ id: string }>();
+  const text = label ?? shorten(id);
+  if (!federationId) {
+    return (
+      <span className="font-mono text-xs" title={id}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <Link
+      to={`/federations/${federationId}/accounts/${id}`}
+      className="font-mono text-xs text-blue-600 dark:text-blue-400 hover:underline"
+      title={id}
+    >
+      {text}
+    </Link>
+  );
+}
+
 // ---- Consensus item row -----------------------------------------------
 
 function ConsensusItemRow({ item }: { item: SessionItem }) {
@@ -460,10 +484,44 @@ function renderCiBody(item: SessionItem): ReactNode {
     }
     case 'meta':
       return renderMeta(item.details, item.peer_id);
+    case 'multi_sig_stability_pool':
+    case 'stability_pool': {
+      const rendered = renderStabilityPool(item.details);
+      if (rendered !== null) return rendered;
+      break;
+    }
     default:
       break;
   }
   return <RawFallback details={item.details} />;
+}
+
+// Stability-pool consensus item: the cycle-turnover vote (V0) carries the next
+// cycle index, the guardian's BTC→fiat price and wall-clock time; V1 is a
+// consensus-version vote. `price` is fiat base units per BTC.
+function renderStabilityPool(details: unknown): ReactNode {
+  const v0 = objField(details, 'V0');
+  if (v0 !== undefined && v0 !== null) {
+    const cycle = objField(v0, 'next_cycle_index');
+    const price = objField(v0, 'price');
+    const secs = objField(objField(v0, 'time'), 'secs_since_epoch');
+    return (
+      <span>
+        <span className="mr-2 text-xs text-gray-500 dark:text-gray-400">cycle turnover</span>
+        {typeof cycle === 'number' && <>→ cycle {formatNumber(cycle)} </>}
+        {typeof price === 'number' && <>· {formatFiat(price)} / BTC </>}
+        {typeof secs === 'number' && (
+          <span className="text-gray-500 dark:text-gray-400">· {formatTimestamp(secs)}</span>
+        )}
+      </span>
+    );
+  }
+  if (objField(details, 'V1') !== undefined) {
+    return (
+      <span className="text-xs text-gray-500 dark:text-gray-400">consensus version vote</span>
+    );
+  }
+  return null;
 }
 
 function RawFallback({ details }: { details: unknown }) {

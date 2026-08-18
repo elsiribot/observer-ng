@@ -358,3 +358,111 @@ export interface UserTransaction {
   last_timestamp: number | null;
   member_txs: MemberTx[];
 }
+
+// ---------------------------------------------------------------------------
+// Stability pool (multi_sig_stability_pool) gold layer — mirrors the structs in
+// fmo_api_types (see fmo_module_stability_pool/schema/v1.sql). All fiat values
+// are the federation's stable-currency base unit (cents for USD); timestamps
+// are unix seconds.
+// ---------------------------------------------------------------------------
+
+export interface SpSummary {
+  account_count: number;
+  seeker_count: number;
+  provider_count: number;
+  btc_depositor_count: number;
+  multisig_count: number;
+  net_msat: number;
+  net_fiat: number;
+  latest_cycle_index: number | null;
+  latest_price_fiat: number | null;
+  cycle_count: number;
+}
+
+export interface SpAccount {
+  account_id: string;
+  /** "seeker" | "provider" | "btc_depositor" (derived from the id prefix). */
+  acc_type: string;
+  is_multisig: boolean;
+  /** null when the account's full key set was never observed (deposit-only). */
+  threshold: number | null;
+  n_keys: number | null;
+  msat_deposited: number;
+  msat_withdrawn: number;
+  msat_net: number;
+  fiat_deposited: number;
+  fiat_withdrawn: number;
+  fiat_net: number;
+  transfers_in_fiat: number;
+  transfers_out_fiat: number;
+  tx_count: number;
+  first_seen: number | null;
+  last_seen: number | null;
+  first_session: number | null;
+  last_session: number | null;
+}
+
+export interface SpAccountsPage {
+  items: SpAccount[];
+  total: number;
+}
+
+export interface SpAccountTx {
+  tx_key: string;
+  /** deposit_seek | deposit_provide | deposit_btc | withdraw | transfer_in | transfer_out */
+  kind: string;
+  /** "in" | "out" | "internal" */
+  direction: string;
+  amount_msat: number | null;
+  fiat_amount: number | null;
+  /** true when fiat_amount is the requested unlock target, not a valued amount. */
+  fiat_is_target: boolean;
+  cycle_index: number | null;
+  cycle_price_fiat: number | null;
+  session_index: number;
+  timestamp: number | null;
+  primary_txid: string;
+  secondary_txid: string | null;
+  /** the other account, for transfers. */
+  counterparty: string | null;
+}
+
+export interface SpAccountTxPage {
+  items: SpAccountTx[];
+  /** (session_index, tx_key) of the last row, for the next page; null if last. */
+  next: [number, string] | null;
+}
+
+export interface SpTransferEdge {
+  counterparty: string;
+  /** "in" (counterparty → account) | "out" (account → counterparty) */
+  direction: string;
+  total_fiat: number;
+  n: number;
+  first_session: number | null;
+  last_session: number | null;
+}
+
+export interface SpCycle {
+  cycle_index: number;
+  start_price_fiat: number;
+  start_time: number | null;
+  num_votes: number;
+}
+
+export interface SpSeriesPoint {
+  cycle_index: number;
+  start_time: number | null;
+  price_fiat: number;
+  cumulative_msat: number | null;
+  cumulative_fiat: number | null;
+}
+
+export interface SpTxAccount {
+  /** "input" | "output" */
+  side: string;
+  index: number;
+  account_id: string;
+  kind: string;
+  counterparty: string | null;
+}

@@ -6,6 +6,7 @@ import { FederationDetail } from './pages/FederationDetail';
 import { SessionDetail } from './pages/SessionDetail';
 import { TransactionDetail } from './pages/TransactionDetail';
 import { UserTransaction } from './pages/UserTransaction';
+import { AccountDetail } from './pages/AccountDetail';
 import { useTheme } from './hooks/useTheme';
 
 function App() {
@@ -22,6 +23,7 @@ function App() {
           <Route path="/federations/:id/session/:session_index" element={<SessionDetail />} />
           <Route path="/federations/:id/tx/:txid" element={<TransactionDetail />} />
           <Route path="/federations/:id/user-transactions/:key" element={<UserTransaction />} />
+          <Route path="/federations/:id/accounts/:account_id" element={<AccountDetail />} />
           <Route path="*" element={<div className="p-4 text-gray-900 dark:text-white">Page not found</div>} />
         </Routes>
       </main>

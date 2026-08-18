@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
-import type { EcashDenomAnon, TxDetail, TxItemPart, UserTransaction } from '../types/api';
+import type {
+  EcashDenomAnon,
+  SpTxAccount,
+  TxDetail,
+  TxItemPart,
+  UserTransaction,
+} from '../types/api';
 import { Alert } from '../components/Alert';
 import { Badge } from '../components/Badge';
-import { classificationBadge, shorten } from '../components/explorer/itemRenderers';
+import { AccountLink, classificationBadge, shorten } from '../components/explorer/itemRenderers';
 import { asSats, formatNumber } from '../utils/format';
 import { formatAnonSet, formatSi } from '../utils/anonSet';
+import { spKindLabel } from '../utils/sp';
 
 // Transaction-detail page: the structured inputs/outputs of one fedimint
 // transaction, drilled into from a session's item list or the consensus
@@ -25,6 +32,10 @@ export function TransactionDetail() {
   // the link still works without the label.
   const [userTx, setUserTx] = useState<UserTransaction | null>(null);
 
+  // Best-effort: which stability-pool account each input/output touches, so the
+  // tx rows can link to account pages. Empty (404 or []) for non-SP txs.
+  const [spAccounts, setSpAccounts] = useState<SpTxAccount[]>([]);
+
   useEffect(() => {
     if (!id || !txid) {
       setError('Invalid transaction reference');
@@ -35,6 +46,13 @@ export function TransactionDetail() {
     setError(null);
     setDetail(null);
     setUserTx(null);
+    setSpAccounts([]);
+    api
+      .getSpTxAccounts(id, txid)
+      .then(setSpAccounts)
+      .catch(() => {
+        // Non-fatal: no SP module / not an SP tx → no account links.
+      });
     api
       .getTxDetail(id, txid)
       .then((txDetail) => {
@@ -69,6 +87,13 @@ export function TransactionDetail() {
       </div>
     );
   }
+
+  const inputAccounts = new Map(
+    spAccounts.filter((a) => a.side === 'input').map((a) => [a.index, a] as const)
+  );
+  const outputAccounts = new Map(
+    spAccounts.filter((a) => a.side === 'output').map((a) => [a.index, a] as const)
+  );
 
   return (
     <div className="py-4 sm:py-8 px-4 sm:px-0">
@@ -146,8 +171,8 @@ export function TransactionDetail() {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-        <TxPartsPanel title="Inputs" parts={detail.inputs} />
-        <TxPartsPanel title="Outputs" parts={detail.outputs} />
+        <TxPartsPanel title="Inputs" parts={detail.inputs} accounts={inputAccounts} />
+        <TxPartsPanel title="Outputs" parts={detail.outputs} accounts={outputAccounts} />
       </div>
     </div>
   );
@@ -218,7 +243,15 @@ function AnonBreakdownBox({ breakdown }: { breakdown: EcashDenomAnon[] }) {
   );
 }
 
-function TxPartsPanel({ title, parts }: { title: string; parts: TxItemPart[] }) {
+function TxPartsPanel({
+  title,
+  parts,
+  accounts,
+}: {
+  title: string;
+  parts: TxItemPart[];
+  accounts?: Map<number, SpTxAccount>;
+}) {
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
       <h2 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white mb-3 sm:mb-4">
@@ -229,7 +262,7 @@ function TxPartsPanel({ title, parts }: { title: string; parts: TxItemPart[] }) 
       ) : (
         <ul className="divide-y divide-gray-200 dark:divide-gray-700">
           {parts.map((part) => (
-            <TxPartRow key={part.index} part={part} />
+            <TxPartRow key={part.index} part={part} account={accounts?.get(part.index)} />
           ))}
         </ul>
       )}
@@ -237,7 +270,7 @@ function TxPartsPanel({ title, parts }: { title: string; parts: TxItemPart[] }) 
   );
 }
 
-function TxPartRow({ part }: { part: TxItemPart }) {
+function TxPartRow({ part, account }: { part: TxItemPart; account?: SpTxAccount }) {
   return (
     <li className="py-2 sm:py-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -249,6 +282,19 @@ function TxPartRow({ part }: { part: TxItemPart }) {
           </span>
         )}
       </div>
+      {account && (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+          <span>{spKindLabel(account.kind)} ·</span>
+          <span>account</span>
+          <AccountLink id={account.account_id} />
+          {account.counterparty && (
+            <>
+              <span>→</span>
+              <AccountLink id={account.counterparty} />
+            </>
+          )}
+        </div>
+      )}
       {part.details !== null && (
         <details className="mt-1">
           <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">

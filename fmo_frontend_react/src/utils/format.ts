@@ -23,6 +23,19 @@ export function formatNumber(num: number): string {
   return num.toLocaleString('en-US');
 }
 
+// Format a stability-pool fiat amount for display. Values are the federation's
+// stable-currency BASE UNIT (cents for a USD federation — the common Fedi
+// case), so we render dollars-and-cents with a `$`. `signed` prefixes a `+`/`−`
+// (used for net-flow figures where direction matters).
+export function formatFiat(baseUnits: number, signed = false): string {
+  const sign = signed ? (baseUnits < 0 ? '−' : '+') : baseUnits < 0 ? '−' : '';
+  const abs = Math.abs(baseUnits) / 100;
+  return `${sign}$${abs.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 // Format a unix-epoch-seconds timestamp for display, or "unknown" when the
 // value is unavailable (e.g. a session that hasn't received a time vote yet).
 export function formatTimestamp(unixSeconds: number | null): string {

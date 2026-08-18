@@ -2353,16 +2353,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.7.9",
  "bitcoin 0.32.102",
  "chrono",
  "deadpool-postgres",
  "fedimint-core",
+ "fmo_api_types",
  "fmo_core",
+ "postgres-from-row",
  "secp256k1 0.29.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-postgres",
  "tracing",
 ]
 

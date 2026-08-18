@@ -10,6 +10,13 @@ import type {
   MintDenomination,
   SessionItem,
   SessionSummary,
+  SpAccount,
+  SpAccountsPage,
+  SpAccountTxPage,
+  SpSeriesPoint,
+  SpSummary,
+  SpTransferEdge,
+  SpTxAccount,
   TxDetail,
   UserTransaction,
 } from '../types/api';
@@ -193,6 +200,65 @@ export const api = {
   // per-transaction anon-bits points plus rolling-7d percentile lines.
   getEcashAnonScatter: (federationId: string) =>
     request<EcashAnonScatter>(`/federations/${federationId}/ecash/anon-scatter`),
+
+  // --- Stability pool gold layer (Stability Pool tab + account pages) ------
+  // All under /modules/multi_sig_stability_pool/*. Fiat values are the
+  // federation's stable-currency base unit (cents for USD).
+
+  getSpSummary: (federationId: string) =>
+    request<SpSummary>(`/federations/${federationId}/modules/multi_sig_stability_pool/summary`),
+
+  // Accounts, offset-paginated. `order` is "net" | "activity" | "recent".
+  getSpAccounts: (
+    federationId: string,
+    params: { order?: string; limit?: number; offset?: number } = {}
+  ) =>
+    request<SpAccountsPage>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/accounts${toQueryString({
+        order: params.order,
+        limit: params.limit,
+        offset: params.offset,
+      })}`
+    ),
+
+  getSpAccount: (federationId: string, accountId: string) =>
+    request<SpAccount>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/account/${accountId}`
+    ),
+
+  // Folded fiat history for one account, keyset-paginated by (session, tx_key).
+  getSpAccountTransactions: (
+    federationId: string,
+    accountId: string,
+    params: { beforeSession?: number; beforeTxKey?: string; limit?: number } = {}
+  ) =>
+    request<SpAccountTxPage>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/account/${accountId}/transactions${toQueryString(
+        {
+          before_session: params.beforeSession,
+          before_tx_key: params.beforeTxKey,
+          limit: params.limit,
+        }
+      )}`
+    ),
+
+  getSpAccountTransfers: (federationId: string, accountId: string) =>
+    request<SpTransferEdge[]>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/account/${accountId}/transfers`
+    ),
+
+  // Per-cycle price + cumulative net-flow series (ascending) for the charts.
+  getSpSeries: (federationId: string) =>
+    request<SpSeriesPoint[]>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/series`
+    ),
+
+  // Which account each stability-pool input/output of a fedimint tx touches,
+  // to cross-link the transaction-detail rows to account pages.
+  getSpTxAccounts: (federationId: string, txid: string) =>
+    request<SpTxAccount[]>(
+      `/federations/${federationId}/modules/multi_sig_stability_pool/tx/${txid}/accounts`
+    ),
 };
 
 // Parses one SSE frame (everything between a pair of blank-line-delimited
