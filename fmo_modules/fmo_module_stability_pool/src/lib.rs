@@ -11,8 +11,9 @@ use tracing::warn;
 pub mod spec;
 
 use spec::{
-    FiatOrAll, StabilityPoolCommonGen, StabilityPoolConsensusItem, StabilityPoolInput,
-    StabilityPoolInputV0, StabilityPoolOutput, StabilityPoolOutputV0, StabilityPoolOutputV1,
+    Account, AccountType, FiatOrAll, StabilityPoolCommonGen, StabilityPoolConsensusItem,
+    StabilityPoolInput, StabilityPoolInputV0, StabilityPoolOutput, StabilityPoolOutputV0,
+    StabilityPoolOutputV1, TransferOutput,
 };
 
 /// Observer module for the fedi `multi_sig_stability_pool` module: records
@@ -39,13 +40,34 @@ impl ObserverModule for StabilityPoolObserver {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn migrations(&self) -> &'static [Migration] {
-        &[Migration {
-            sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v0.sql")),
-        }]
+        &[
+            Migration {
+                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v0.sql")),
+            },
+            Migration {
+                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v1.sql")),
+            },
+        ]
+    }
+
+    /// Gold-layer materialized views core refreshes each cycle (after
+    /// `session_times` / `heal_gold`), listed in dependency order: `cycles`
+    /// (price series) feeds `account_tx` (folded, fiat-valued history), which
+    /// feeds the rollups.
+    fn matviews(&self) -> &'static [&'static str] {
+        &[
+            "fmo_multi_sig_stability_pool.cycles",
+            "fmo_multi_sig_stability_pool.account_tx",
+            "fmo_multi_sig_stability_pool.account_tx_legs",
+            "fmo_multi_sig_stability_pool.account_totals",
+            "fmo_multi_sig_stability_pool.transfer_edges",
+            "fmo_multi_sig_stability_pool.sp_daily",
+            "fmo_multi_sig_stability_pool.pool_flows",
+        ]
     }
 
     async fn process_input(
@@ -83,14 +105,16 @@ impl ObserverModule for StabilityPoolObserver {
             }
         };
 
-        let account_id = input_v0.account().id().to_string();
+        let account = input_v0.account();
+        let account_id = account.id().to_string();
+        let fed = meta.federation_id.consensus_encode_to_vec();
 
         ctx.dbtx
             .execute(
                 "INSERT INTO withdrawals VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT DO NOTHING",
                 &[
-                    &meta.federation_id.consensus_encode_to_vec(),
+                    &fed,
                     &meta.txid.consensus_encode_to_vec(),
                     &(meta.index as i32),
                     &kind,
@@ -101,6 +125,10 @@ impl ObserverModule for StabilityPoolObserver {
                 ],
             )
             .await?;
+
+        // A withdrawal/unlock input carries the full `Account`, so we can record
+        // its (multi-sig) structure — deposit outputs only carry the id hash.
+        record_account(ctx, &fed, meta.session_index as i32, &account).await?;
 
         Ok(ProcessedItem {
             amount: Some(amount),
@@ -128,7 +156,7 @@ impl ObserverModule for StabilityPoolObserver {
             StabilityPoolOutput::Default { .. } => None,
         };
 
-        let Some(deposit) = resolved else {
+        let Some(output) = resolved else {
             warn!("Unknown stability_pool output version, storing JSON only: {sp_output:?}");
             return Ok(ProcessedItem {
                 amount: None,
@@ -136,25 +164,61 @@ impl ObserverModule for StabilityPoolObserver {
             });
         };
 
-        ctx.dbtx
-            .execute(
-                "INSERT INTO deposits VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT DO NOTHING",
-                &[
-                    &meta.federation_id.consensus_encode_to_vec(),
-                    &meta.txid.consensus_encode_to_vec(),
-                    &(meta.index as i32),
-                    &(deposit.version as i16),
-                    &deposit.action,
-                    &deposit.account_id,
-                    &(deposit.amount.msats as i64),
-                    &deposit.min_fee_rate_ppb,
-                ],
-            )
-            .await?;
+        let fed = meta.federation_id.consensus_encode_to_vec();
+        let txid = meta.txid.consensus_encode_to_vec();
+
+        let amount = match output {
+            SpOutput::Deposit(deposit) => {
+                ctx.dbtx
+                    .execute(
+                        "INSERT INTO deposits VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                         ON CONFLICT DO NOTHING",
+                        &[
+                            &fed,
+                            &txid,
+                            &(meta.index as i32),
+                            &(deposit.version as i16),
+                            &deposit.action,
+                            &deposit.account_id,
+                            &(deposit.amount.msats as i64),
+                            &deposit.min_fee_rate_ppb,
+                        ],
+                    )
+                    .await?;
+                deposit.amount
+            }
+            SpOutput::Transfer(transfer) => {
+                // Transfers carry no msats but a signed, fiat-denominated request
+                // with sender/recipient. They get their own table (not
+                // `deposits`) and we record the sender's multi-sig structure.
+                ctx.dbtx
+                    .execute(
+                        "INSERT INTO transfers
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                         ON CONFLICT DO NOTHING",
+                        &[
+                            &fed,
+                            &txid,
+                            &(meta.index as i32),
+                            &(transfer.version as i16),
+                            &transfer.acc_type,
+                            &transfer.from_account.id().to_string(),
+                            &transfer.to_account_id,
+                            &transfer.transfer_fiat,
+                            &transfer.valid_until_cycle,
+                            &transfer.new_fee_rate_ppb,
+                            &transfer.meta,
+                        ],
+                    )
+                    .await?;
+                record_account(ctx, &fed, meta.session_index as i32, &transfer.from_account)
+                    .await?;
+                Amount::ZERO
+            }
+        };
 
         Ok(ProcessedItem {
-            amount: Some(deposit.amount),
+            amount: Some(amount),
             details: serde_json::to_value(sp_output).ok(),
         })
     }
@@ -200,6 +264,13 @@ impl ObserverModule for StabilityPoolObserver {
     }
 }
 
+/// A classified stability-pool output: either a value-bearing deposit or a
+/// (0-msat) fiat-denominated transfer between pool accounts.
+enum SpOutput {
+    Deposit(Deposit),
+    Transfer(TransferInfo),
+}
+
 /// A stability-pool deposit output normalized for storage.
 struct Deposit {
     version: u8,
@@ -209,63 +280,130 @@ struct Deposit {
     min_fee_rate_ppb: Option<i64>,
 }
 
-fn classify_v0(v0: &StabilityPoolOutputV0) -> Deposit {
-    match v0 {
-        StabilityPoolOutputV0::DepositToSeek(o) => Deposit {
-            version: 0,
-            action: "deposit_to_seek",
-            account_id: o.account_id.to_string(),
-            amount: o.seek_request.0,
-            min_fee_rate_ppb: None,
-        },
-        StabilityPoolOutputV0::DepositToProvide(o) => Deposit {
-            version: 0,
-            action: "deposit_to_provide",
-            account_id: o.account_id.to_string(),
-            amount: o.provide_request.amount,
-            min_fee_rate_ppb: Some(o.provide_request.min_fee_rate.0 as i64),
-        },
-        StabilityPoolOutputV0::Transfer(t) => Deposit {
-            version: 0,
-            action: "transfer",
-            account_id: t.signed_request.details().from().id().to_string(),
-            amount: Amount::ZERO,
-            min_fee_rate_ppb: None,
-        },
+/// A stability-pool transfer output normalized for storage. Carries the full
+/// sender `Account` so its multi-sig structure can be recorded.
+struct TransferInfo {
+    version: u8,
+    acc_type: &'static str,
+    from_account: Account,
+    to_account_id: String,
+    transfer_fiat: i64,
+    valid_until_cycle: i64,
+    new_fee_rate_ppb: Option<i64>,
+    meta: Vec<u8>,
+}
+
+/// Human-readable account-type tag matching the account-id bech32 HRP.
+fn acc_type_str(acc_type: AccountType) -> &'static str {
+    match acc_type {
+        AccountType::Seeker => "seeker",
+        AccountType::Provider => "provider",
+        AccountType::BtcDepositor => "btc_depositor",
     }
 }
 
-fn classify_v1(v1: &StabilityPoolOutputV1) -> Deposit {
+/// Normalizes a transfer output (version-agnostic — V0/V1 transfers are
+/// identical) into a [`TransferInfo`].
+fn transfer_info(version: u8, t: &TransferOutput) -> TransferInfo {
+    let req = t.signed_request.details();
+    TransferInfo {
+        version,
+        acc_type: acc_type_str(req.from().acc_type()),
+        from_account: req.from().clone(),
+        to_account_id: req.to().to_string(),
+        transfer_fiat: req.amount().0 as i64,
+        valid_until_cycle: req.valid_until_cycle() as i64,
+        new_fee_rate_ppb: req.new_fee_rate().map(|rate| rate.0 as i64),
+        meta: req.meta().to_vec(),
+    }
+}
+
+fn classify_v0(v0: &StabilityPoolOutputV0) -> SpOutput {
+    match v0 {
+        StabilityPoolOutputV0::DepositToSeek(o) => SpOutput::Deposit(Deposit {
+            version: 0,
+            action: "deposit_to_seek",
+            account_id: o.account_id.to_string(),
+            amount: o.seek_request.0,
+            min_fee_rate_ppb: None,
+        }),
+        StabilityPoolOutputV0::DepositToProvide(o) => SpOutput::Deposit(Deposit {
+            version: 0,
+            action: "deposit_to_provide",
+            account_id: o.account_id.to_string(),
+            amount: o.provide_request.amount,
+            min_fee_rate_ppb: Some(o.provide_request.min_fee_rate.0 as i64),
+        }),
+        StabilityPoolOutputV0::Transfer(t) => SpOutput::Transfer(transfer_info(0, t)),
+    }
+}
+
+fn classify_v1(v1: &StabilityPoolOutputV1) -> SpOutput {
     match v1 {
-        StabilityPoolOutputV1::DepositToSeek(o) => Deposit {
+        StabilityPoolOutputV1::DepositToSeek(o) => SpOutput::Deposit(Deposit {
             version: 1,
             action: "deposit_to_seek",
             account_id: o.account_id.to_string(),
             amount: o.seek_request.0,
             min_fee_rate_ppb: None,
-        },
-        StabilityPoolOutputV1::DepositToProvide(o) => Deposit {
+        }),
+        StabilityPoolOutputV1::DepositToProvide(o) => SpOutput::Deposit(Deposit {
             version: 1,
             action: "deposit_to_provide",
             account_id: o.account_id.to_string(),
             amount: o.provide_request.amount,
             min_fee_rate_ppb: Some(o.provide_request.min_fee_rate.0 as i64),
-        },
-        StabilityPoolOutputV1::Transfer(t) => Deposit {
-            version: 1,
-            action: "transfer",
-            account_id: t.signed_request.details().from().id().to_string(),
-            amount: Amount::ZERO,
-            min_fee_rate_ppb: None,
-        },
-        StabilityPoolOutputV1::DepositToBtcBalance(o) => Deposit {
+        }),
+        StabilityPoolOutputV1::Transfer(t) => SpOutput::Transfer(transfer_info(1, t)),
+        StabilityPoolOutputV1::DepositToBtcBalance(o) => SpOutput::Deposit(Deposit {
             version: 1,
             action: "deposit_to_btc_balance",
             account_id: o.account_id.to_string(),
             amount: o.seek_request.0,
             min_fee_rate_ppb: None,
-        },
+        }),
     }
+}
+
+/// Records an observed `Account`'s multi-sig structure (`account_multisig`) and
+/// its signing keys (`account_keys`), idempotently. Only callable where the
+/// full `Account` is on the wire (withdrawal/unlock inputs, transfer senders).
+async fn record_account(
+    ctx: &mut ProcessCtx<'_>,
+    fed: &[u8],
+    session_index: i32,
+    account: &Account,
+) -> anyhow::Result<()> {
+    let account_id = account.id().to_string();
+    ctx.dbtx
+        .execute(
+            "INSERT INTO account_multisig VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT DO NOTHING",
+            &[
+                &fed,
+                &account_id,
+                &acc_type_str(account.acc_type()),
+                &(account.threshold() as i64),
+                &(account.pub_keys().count() as i64),
+                &session_index,
+            ],
+        )
+        .await?;
+    for (idx, pubkey) in account.pub_keys().enumerate() {
+        ctx.dbtx
+            .execute(
+                "INSERT INTO account_keys VALUES ($1, $2, $3, $4)
+                 ON CONFLICT DO NOTHING",
+                &[
+                    &fed,
+                    &account_id,
+                    &(idx as i32),
+                    &pubkey.serialize().to_vec(),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Converts a `SystemTime` cycle vote into a UTC `NaiveDateTime`, or `None` if
