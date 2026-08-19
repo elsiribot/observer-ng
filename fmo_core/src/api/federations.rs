@@ -1,5 +1,5 @@
 use anyhow::Context;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::CACHE_CONTROL;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
@@ -12,7 +12,7 @@ use fedimint_core::invite_code::InviteCode;
 use fedimint_core::Amount;
 use fmo_api_types::{
     EcashAnonPercentile, EcashAnonPoint, EcashAnonScatter, FederationActivity, FederationHealth,
-    FederationSummary, FedimintTotals,
+    FederationSummary, FedimintTotals, GlobalActivityPoint,
 };
 use futures::future::join_all;
 use postgres_from_row::FromRow;
@@ -34,6 +34,7 @@ pub fn get_federations_routes() -> Router<AppState> {
         .route("/", get(list_observed_federations))
         .route("/", put(add_observed_federation))
         .route("/totals", get(get_federation_totals))
+        .route("/activity", get(get_global_activity))
         // TODO: move to nostr module
         .route("/nostr/rating", put(publish_rating_event))
         .route("/:federation_id", get(get_federation_overview))
@@ -279,6 +280,24 @@ async fn get_federation_totals(
     Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(totals)))
 }
 
+#[derive(Deserialize, Debug)]
+struct GlobalActivityParams {
+    days: Option<u32>,
+}
+
+/// Fleet-wide daily activity (volume + tx count), summed across every
+/// federation. Powers the global activity chart on the home page.
+async fn get_global_activity(
+    Query(params): Query<GlobalActivityParams>,
+    State(state): State<AppState>,
+) -> crate::error::Result<impl IntoResponse> {
+    let points = state
+        .observer
+        .global_activity(params.days.unwrap_or(90))
+        .await?;
+    Ok(([(CACHE_CONTROL, HOT_CACHE_CONTROL)], Json(points)))
+}
+
 async fn publish_rating_event(
     State(state): State<AppState>,
     Json(event): Json<nostr_sdk::Event>,
@@ -492,6 +511,44 @@ impl FederationObserver {
             row.tx_count as u64,
             Amount::from_msats(row.volume_msat as u64),
         ))
+    }
+
+    /// Fleet-wide daily activity over the last `days` days, summed across every
+    /// federation from the `federation_tx_daily` matview (one cheap grouped
+    /// scan). Days with no activity anywhere are simply absent.
+    async fn global_activity(&self, days: u32) -> anyhow::Result<Vec<GlobalActivityPoint>> {
+        #[derive(Debug, FromRow)]
+        struct GlobalActivityRow {
+            date: NaiveDate,
+            tx_count: i64,
+            volume_msat: i64,
+        }
+
+        let since = (chrono::offset::Utc::now() - chrono::Duration::days(days as i64)).date_naive();
+        // language=postgresql
+        let rows = query::<GlobalActivityRow>(
+            &self.connection().await?,
+            "
+            SELECT day                          AS date,
+                   SUM(tx_count)::bigint        AS tx_count,
+                   SUM(volume_msat)::bigint     AS volume_msat
+            FROM federation_tx_daily
+            WHERE day >= $1
+            GROUP BY day
+            ORDER BY day
+        ",
+            &[&since],
+        )
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| GlobalActivityPoint {
+                date: r.date.to_string(),
+                tx_count: r.tx_count as u64,
+                volume_msat: r.volume_msat as u64,
+            })
+            .collect())
     }
 
     async fn federation_activity(

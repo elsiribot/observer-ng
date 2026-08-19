@@ -46,6 +46,15 @@ pub struct FederationActivity {
     pub amount_transferred: Amount,
 }
 
+/// One day of fleet-wide activity, summed across every federation from the
+/// `federation_tx_daily` matview. `date` is ISO `YYYY-MM-DD` (UTC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalActivityPoint {
+    pub date: String,
+    pub tx_count: u64,
+    pub volume_msat: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationUtxo {
     pub address: bitcoin::Address<NetworkUnchecked>,

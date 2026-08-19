@@ -466,3 +466,11 @@ export interface SpTxAccount {
   kind: string;
   counterparty: string | null;
 }
+
+/// One day of fleet-wide activity (summed across all federations), from the
+/// `/federations/activity` endpoint. `date` is ISO `YYYY-MM-DD`.
+export interface GlobalActivityPoint {
+  date: string;
+  tx_count: number;
+  volume_msat: number;
+}

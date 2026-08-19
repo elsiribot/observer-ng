@@ -5,6 +5,7 @@ import type {
   FederationSummary,
   FederationUptime,
   GatewayInfo,
+  GlobalActivityPoint,
   GuardianLatencySeries,
   GuardianTimeline,
   MintDenomination,
@@ -99,6 +100,12 @@ export const api = {
   getTotals: () => request<FedimintTotals>('/federations/totals'),
 
   getFederations: () => request<FederationSummary[]>('/federations'),
+
+  // Fleet-wide daily activity (volume + tx count) over the last `days` days
+  // (backend default 90), summed across every federation. Powers the global
+  // activity chart on the home page.
+  getGlobalActivity: (days?: number) =>
+    request<GlobalActivityPoint[]>(`/federations/activity${toQueryString({ days })}`),
 
   getFederationSummary: (id: string) => request<FederationSummary>(`/federations/${id}/summary`),
 
