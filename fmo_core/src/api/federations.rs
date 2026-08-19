@@ -766,13 +766,23 @@ impl FederationObserver {
             .filter(|&health| *health == FederationHealth::Offline)
             .count() as u64;
 
+        // Exclude 102.5-sat (102_500 msat) test transactions — throwaway
+        // txns of exactly this value spam the fleet totals. A transaction is
+        // "test" when its total input amount equals 102_500 msat; those are
+        // dropped from both the count and the volume.
         let totals = query_one::<FedimintTotalsResult>(
             &self.connection().await?,
             // language=postgresql
             "
-                SELECT (SELECT count(*) from federations)::bigint               as federations,
-                       (SELECT count(*) from transactions)::bigint               as tx_count,
-                       (SELECT COALESCE(sum(amount_msat), 0) from transaction_inputs)::bigint as tx_volume
+                WITH tx_vol AS (
+                    SELECT SUM(amount_msat) AS vol
+                    FROM transaction_inputs
+                    GROUP BY federation_id, txid
+                )
+                SELECT (SELECT count(*) FROM federations)::bigint AS federations,
+                       ((SELECT count(*) FROM transactions)
+                         - (SELECT count(*) FROM tx_vol WHERE vol = 102500))::bigint AS tx_count,
+                       (SELECT COALESCE(SUM(vol), 0) FROM tx_vol WHERE vol <> 102500)::bigint AS tx_volume
             ",
             &[],
         )
