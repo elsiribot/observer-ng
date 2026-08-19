@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { NavBar } from './components/NavBar';
 import { Home } from './pages/Home';
 import { Nostr } from './pages/Nostr';
+import { GlobalStats } from './pages/GlobalStats';
 import { FederationDetail } from './pages/FederationDetail';
 import { SessionDetail } from './pages/SessionDetail';
 import { TransactionDetail } from './pages/TransactionDetail';
@@ -18,6 +19,7 @@ function App() {
         <NavBar theme={theme} onToggleTheme={toggleTheme} />
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/stats" element={<GlobalStats />} />
           <Route path="/nostr" element={<Nostr />} />
           <Route path="/federations/:id" element={<FederationDetail />} />
           <Route path="/federations/:id/session/:session_index" element={<SessionDetail />} />

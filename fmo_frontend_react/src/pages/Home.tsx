@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../services/api';
 import type { FederationSummary } from '../types/api';
 import { Totals } from '../components/Totals';
-import { GlobalActivityChart } from '../components/GlobalActivityChart';
 import { FederationRow } from '../components/FederationRow';
 import {
   DEFAULT_SORT_KEY,
@@ -87,10 +86,6 @@ export function Home() {
     <div className="pb-4">
       <div className="my-8 sm:my-16">
         <Totals />
-      </div>
-
-      <div className="mb-8">
-        <GlobalActivityChart />
       </div>
 
       {/* Search Bar */}
